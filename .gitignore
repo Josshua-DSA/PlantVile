@@ -1,0 +1,17 @@
+# dataset & output - tidak masuk git
+data/
+runs/
+
+# python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# model artifacts
+*.keras
+*.h5
+*.weights.h5
+
+# env
+venv/
+.venv/
