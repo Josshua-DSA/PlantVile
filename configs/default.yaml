@@ -1,0 +1,100 @@
+# Default configuration - UAS Neuro Computing / PlantVillage
+# Every key here is also settable from the terminal:
+#   --set data.batch_size=64 --set train.epochs=10
+# Run `python main.py --list-params` for the full list with types and defaults.
+
+data:
+  root: data                       # flat: berisi folder kelas PlantVillage (15 kelas)
+  variant: color                   # color | grayscale | segmented
+  img_height: 128
+  img_width: 128
+  channels: 3
+  class_subset: []                 # kosong = semua 38 kelas
+  max_per_class: 0                 # 0 = semua gambar
+  val_split: 0.15
+  test_split: 0.15
+  split_strategy: stratified       # stratified | per_class_tail
+  shuffle_seed: 42
+  batch_size: 32
+  cache: 'none'                      # none | memory | disk
+  prefetch: 1
+  augment: true
+  aug_rotation: 0.04
+  aug_width_shift: 0.10
+  aug_height_shift: 0.10
+  aug_zoom: 0.10
+  aug_shear: 0.0
+  aug_hflip: true
+  aug_vflip: false
+  aug_brightness: 0.15
+  aug_contrast: 0.15
+  aug_fill_mode: reflect
+  rescale: true
+  normalize: imagenet              # none | div255 | imagenet
+
+model:
+  arch: mobilenetv2                # simple_cnn | vgg16 | mobilenetv2 | resnet50 | efficientnetb0
+  include_top: false
+  weights: imagenet                # imagenet | none
+  freeze_base: true
+  fine_tune_at: 0                  # 0 = off
+  dropout: 0.3
+  dense_units: 256
+  batch_norm: true
+  l2_weight_decay: 0.0
+  conv_blocks: 4                   # simple_cnn saja
+  filters_base: 32                 # simple_cnn saja
+  kernel_size: 3                   # simple_cnn saja
+  pool_size: 2                     # simple_cnn saja
+
+train:
+  optimizer: adam                  # adam | adamw | sgd | rmsprop | nadam
+  learning_rate: 0.001
+  momentum: 0.9
+  beta_1: 0.9
+  beta_2: 0.999
+  epsilon: 1.0e-07
+  loss: categorical_crossentropy   # categorical_crossentropy | sparse_categorical_crossentropy | focal
+  label_smoothing: 0.0
+  epochs: 20
+  class_weight: balanced           # none | balanced | manual
+  class_weight_manual: []
+  early_stopping: true
+  es_monitor: val_loss
+  es_patience: 5
+  es_min_delta: 0.0001
+  es_mode: auto
+  es_restore_best: true
+  reduce_lr: true
+  lr_monitor: val_loss
+  lr_factor: 0.5
+  lr_patience: 3
+  lr_min_lr: 1.0e-06
+  lr_cooldown: 0
+  checkpoint_monitor: val_accuracy
+  save_best_only: true
+  mixed_precision: 'off'             # off | mixed_float16
+  steps_per_epoch: 0
+  validation_steps: 0
+
+runtime:
+  device: auto                     # cpu | gpu | auto
+  run_name: ""
+  runs_dir: runs
+  seed: 42
+  verbose: 1
+  log_csv: true
+  tensorboard: false
+  resume_from: ""
+  num_parallel_calls: 4
+  deterministic: false
+
+eval:
+  eval_batch_size: 32
+  top_k: 3
+  confusion_matrix: true
+  classification_report: true
+  per_class_metrics: true
+  sample_predictions: 16
+  save_plots: true
+  eval_split: test                 # val | test | train
