@@ -75,6 +75,7 @@ import warnings
 from collections import deque
 from pathlib import Path
 
+# Suppress TF/CUDA/absl startup noise before importing TensorFlow
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
@@ -88,6 +89,7 @@ import pandas as pd
 from IPython.display import Image as IPyImage
 from IPython.display import display as ipy_display
 
+# Repository config and dataset lookup order (Kaggle v2, legacy Kaggle, local fallback)
 REPO_URL = "https://github.com/Josshua-DSA/PlantVile.git"
 BRANCH = "experiment-arfi"
 
@@ -107,6 +109,7 @@ DATA_ROOT = next((p for p in DATA_ROOT_CANDIDATES if p.is_dir()), None)
 assert DATA_ROOT is not None, f"Dataset tidak ditemukan di: {[str(p) for p in DATA_ROOT_CANDIDATES]}"
 DATA_ROOT = DATA_ROOT.resolve()
 
+# Regex filter for benign TF/XLA/CUDA initialization chatter
 _NOISE_RE = re.compile(
     r"(^WARNING: All log messages before absl::InitializeLog|"
     r"^WARNING:tensorflow:|"
@@ -139,6 +142,7 @@ def run_clean(cmd: list[str]) -> None:
         env=env,
     )
     assert proc.stdout is not None
+    # Keep recent lines so full failure context is shown if a subprocess exits non-zero
     tail = deque(maxlen=40)
     prev_blank = False
     for line in proc.stdout:
@@ -162,6 +166,7 @@ def run_clean(cmd: list[str]) -> None:
         raise subprocess.CalledProcessError(rc, cmd)
 
 
+# Idempotent repo sync so re-runs always match the target branch
 if (WORK_DIR / ".git").is_dir():
     run_clean(["git", "-C", str(WORK_DIR), "fetch", "-q", "origin", BRANCH])
     run_clean(["git", "-C", str(WORK_DIR), "checkout", "-q", BRANCH])
@@ -177,6 +182,7 @@ import keras
 import tensorflow as tf
 
 tf.get_logger().setLevel("ERROR")
+# Auto-select GPU (T4x2) or CPU preset based on detected accelerator
 gpus = tf.config.list_physical_devices("GPU")
 HAS_GPU = len(gpus) > 0
 CONFIG_PATH = "configs/kaggle_t4x2.yaml" if HAS_GPU else "configs/default.yaml"
@@ -197,7 +203,8 @@ ipy_display(env_table)
 
     # ---------------------------------------------------------------- Cell 2
     cells.append(md("## 2. Audit Dataset & Validasi *Pre-Flight*"))
-    cells.append(code("""audit_out = RUNS_DIR / "dataset_audit.json"
+    cells.append(code("""# Run dataset integrity audit once (MD5 duplicates, corrupt files, class imbalance)
+audit_out = RUNS_DIR / "dataset_audit.json"
 if not audit_out.is_file():
     run_clean([sys.executable, "scripts/audit_dataset.py", "--root", str(DATA_ROOT), "--out", str(audit_out)])
 
@@ -210,6 +217,7 @@ ipy_display(pd.DataFrame([
     ("PIL Corrupt Count", audit_data["pil_verification"]["corrupt_count"]),
 ], columns=["Audit Metric", "Value"]))
 
+# Pre-flight validation: verify config schema, split pipeline, and model build before training
 check_cmd = [
     sys.executable, "main.py", "--check", "--quiet",
     "--config", CONFIG_PATH,
@@ -222,7 +230,9 @@ run_clean(check_cmd)
 
     # ---------------------------------------------------------------- Cell 3
     cells.append(md("## 3. Matriks Eksperimen Terkontrol (3 Arsitektur *Mobile-Edge*)"))
-    cells.append(code("""COMMON_OVERRIDES = [
+    cells.append(code("""# Shared hyperparameters held fixed across all 3 architectures for a controlled comparison
+COMMON_OVERRIDES = [
+    # Input & leakage-safe splitting
     "data.img_height=224",
     "data.img_width=224",
     "data.channels=3",
@@ -231,6 +241,7 @@ run_clean(check_cmd)
     "data.deduplicate=true",
     "data.group_same_leaf=true",
     "data.shuffle_seed=42",
+    # Data augmentation
     "data.augment=true",
     "data.aug_hflip=true",
     "data.aug_vflip=true",
@@ -242,11 +253,13 @@ run_clean(check_cmd)
     "data.aug_brightness=0.20",
     "data.aug_contrast=0.20",
     "data.aug_fill_mode=reflect",
+    # Classification head & regularization
     "model.dense_units=256",
     "model.dropout=0.3",
     "model.batch_norm=true",
     "model.l2_weight_decay=0.0001",
     "train.adamw_weight_decay=0.004",
+    # Callbacks & per-step gradient-descent logging
     "train.log_step_every=10",
     "train.early_stopping=true",
     "train.es_monitor=val_loss",
@@ -259,6 +272,7 @@ run_clean(check_cmd)
     "train.lr_min_lr=1e-06",
 ]
 
+# Two-stage transfer learning: Stage 1 frozen-head warmup -> Stage 2 partial backbone unfreeze (~top 30%)
 EXP_REGISTRY = {
     "m1_mobilenetv2_head": {
         "desc": "MobileNetV2 Stage 1: frozen head warmup (10 ep, Adam 1e-3)",
@@ -325,6 +339,7 @@ STAGE2_CANDIDATES = [
     "m4b_mobilenetv3l_ft",
 ]
 
+# Execution controls: set SKIP_IF_DONE=False to force re-running completed experiments
 RUN_EXPERIMENTS = True
 SKIP_IF_DONE = True
 STRATEGY_MODE = "auto"
@@ -340,6 +355,7 @@ SELECTED_RUNS = [
 
 
 def build_run_command(run_id: str, check_resume: bool = False) -> list[str]:
+    \"\"\"Build the main.py CLI command and wire Stage 1 best weights into Stage 2 fine-tuning.\"\"\"
     spec = EXP_REGISTRY[run_id]
     cmd = [
         sys.executable, "main.py", "--yes", "--quiet",
@@ -381,6 +397,7 @@ ipy_display(schedule_df)
     cells.append(code("""if not RUN_EXPERIMENTS:
     print("Training dilewati (RUN_EXPERIMENTS = False).")
 else:
+    # Run sequentially; evaluation uses val split only (test split stays untouched during selection)
     for rid in SELECTED_RUNS:
         done_marker = RUNS_DIR / rid / "val_metrics.json"
         if SKIP_IF_DONE and done_marker.is_file():
@@ -397,6 +414,7 @@ else:
     cells.append(md("## 5. Leaderboard Validasi (`val`) & Kurva Gradient Descent"))
     cells.append(code("""import numpy as np
 
+# Aggregate validation metrics across completed runs for model comparison
 rows = []
 for metrics_file in sorted(RUNS_DIR.glob("*/val_metrics.json")):
     rdir = metrics_file.parent
@@ -405,6 +423,7 @@ for metrics_file in sorted(RUNS_DIR.glob("*/val_metrics.json")):
     per_cls = m.get("per_class", [])
     worst_recall = min((c["recall"] for c in per_cls), default=np.nan)
     gap = np.nan
+    # Compute train-val accuracy gap as a quick overfitting check
     hist_file = rdir / "history.json"
     if hist_file.is_file():
         h = json.loads(hist_file.read_text(encoding="utf-8"))
@@ -428,6 +447,7 @@ df_val = pd.DataFrame(rows).sort_values(["f1_macro", "accuracy"], ascending=Fals
 df_val.to_csv(RUNS_DIR / "experiment_leaderboard.csv", index=False)
 ipy_display(df_val)
 
+# Generate Stage 1->2 continuous GD curves, cross-architecture overlay, and per-step EMA plots
 gd_out = RUNS_DIR / "gradient_descent_plots"
 run_clean([
     sys.executable, "-m", "scripts.plot_gradient_descent",
@@ -449,7 +469,8 @@ for png_name in [
 
     # ---------------------------------------------------------------- Cell 6
     cells.append(md("## 6. Evaluasi Final Otomatis 1× pada Split `test` (Seluruh Kandidat Stage 2)"))
-    cells.append(code("""test_rows = []
+    cells.append(code("""# Evaluate each Stage 2 candidate once on the held-out test split (strictly post-selection)
+test_rows = []
 for rid in STAGE2_CANDIDATES:
     rdir = RUNS_DIR / rid
     best_model_path = rdir / "best.keras"
@@ -459,6 +480,7 @@ for rid in STAGE2_CANDIDATES:
 
     test_json = rdir / "test_metrics.json"
     if not (SKIP_IF_DONE and test_json.is_file()):
+        # Pass each run's frozen config_used.yaml to guarantee identical preprocessing at test time
         eval_cmd = [
             sys.executable, "main.py", "--quiet",
             "--eval", str(best_model_path),
@@ -488,6 +510,7 @@ df_test = pd.DataFrame(test_rows).sort_values(["f1_macro", "accuracy"], ascendin
 df_test.to_csv(RUNS_DIR / "test_leaderboard.csv", index=False)
 ipy_display(df_test)
 
+# Render error-analysis artifacts (confusion matrix, calibration, Grad-CAM) for the top test model
 if len(df_test):
     winner_run = df_test.iloc[0]["run_id"]
     print(f"Visualisasi Error Analysis & Grad-CAM split 'test' — {winner_run}:")
@@ -502,6 +525,7 @@ if len(df_test):
     cells.append(code("""MOBILE_OUT = RUNS_DIR / "mobile_export"
 HANDOFF_DIR = BASE_OUT / "ui_handoff_bundle"
 
+# Export FP32 Keras + TFLite (FP32/FP16/INT8 calibrated on train split) and build web/mobile handoff bundle
 export_cmd = [
     sys.executable, "-m", "scripts.export_tflite",
     "--runs-dir", str(RUNS_DIR),
@@ -513,6 +537,7 @@ export_cmd = [
 ]
 run_clean(export_cmd)
 
+# Display model size, CPU latency (p50/p95), and macro-F1 retention vs. FP32 baseline
 bench_csv = MOBILE_OUT / "mobile_benchmark_summary.csv"
 if bench_csv.is_file():
     df_bench = pd.read_csv(bench_csv)
@@ -527,12 +552,14 @@ if bench_csv.is_file():
     cells.append(md("## 8. Pengemasan Deliverable Siap Unduh (`ui_handoff_bundle.zip` & `experiment_reports.zip`)"))
     cells.append(code("""import zipfile
 
+# Bundle deployable inference artifacts (web FP32 Keras + inference_api.py + mobile TFLite)
 ui_zip = BASE_OUT / "ui_handoff_bundle.zip"
 with zipfile.ZipFile(ui_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     for fpath in sorted(HANDOFF_DIR.rglob("*")):
         if fpath.is_file():
             zf.write(fpath, arcname=f"ui_handoff_bundle/{fpath.relative_to(HANDOFF_DIR)}")
 
+# Archive lightweight reports/plots only (exclude heavy .keras checkpoints to conserve disk)
 reports_zip = BASE_OUT / "experiment_reports.zip"
 report_exts = {".json", ".csv", ".txt", ".png", ".yaml"}
 n_rep = 0
