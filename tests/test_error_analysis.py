@@ -68,8 +68,6 @@ def test_extract_misclassified_sorted_by_confidence():
 
 
 def test_config_validate_eval_error_analysis_and_gradcam_bounds():
-    cfg = cfgmod.default_config()
-    cfg["data"]["root"] = "."  # avoid missing dir noise? no, '.' has no class folders
     bad = cfgmod.apply_overrides(cfgmod.default_config(), [
         "eval.gradcam_alpha=0.0",
         "eval.gradcam_samples=-1",
@@ -197,3 +195,175 @@ def test_split_dataset_group_same_leaf_no_leakage():
     assert not (g_tr & g_va)
     assert not (g_tr & g_te)
     assert not (g_va & g_te)
+
+
+def test_all_five_optimizers_build_cleanly():
+    from src.model import _build_optimizer
+
+    for opt_name in ("adam", "adamw", "sgd", "rmsprop", "nadam"):
+        cfg = cfgmod.apply_overrides(cfgmod.default_config(), [f"train.optimizer={opt_name}"])
+        opt = _build_optimizer(cfg["train"])
+        assert opt is not None
+
+
+def test_mobilenetv3_large_build_and_gradcam(tmp_path):
+    from src.gradcam import explain_image
+    from src.model import build_model
+
+    arr = np.full((64, 64, 3), 128, dtype=np.uint8)
+    img_path = tmp_path / "leaf.jpg"
+    Image.fromarray(arr).save(img_path, quality=95)
+
+    cfg = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "model.arch=mobilenetv3_large",
+        "model.weights=none",
+        "model.freeze_base=true",
+        "model.fine_tune_at=124",
+        "data.img_height=64",
+        "data.img_width=64",
+    ])
+    model = build_model(cfg, num_classes=3)
+    assert model.name == "mobilenetv3_large"
+    info = explain_image(model, img_path, cfg, ["A", "B", "C"])
+    assert info["heatmap"].ndim == 2
+    assert info["overlay_rgb"].shape == (64, 64, 3)
+
+
+def test_config_validate_dangerous_combinations_and_warnings():
+    import pytest
+
+    bad_norm = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "model.arch=mobilenetv2",
+        "model.weights=imagenet",
+        "data.normalize=div255",
+    ])
+    probs_norm = cfgmod.validate(bad_norm)
+    assert any("div255" in p for p in probs_norm)
+
+    bad_aug = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "data.rescale=false",
+        "data.augment=true",
+        "data.aug_brightness=0.15",
+    ])
+    probs_aug = cfgmod.validate(bad_aug)
+    assert any("rescale=false" in p for p in probs_aug)
+
+    warn_cfg = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "train.loss=focal",
+        "train.class_weight=balanced",
+        "train.label_smoothing=0.05",
+    ])
+    with pytest.warns(UserWarning):
+        cfgmod.validate(warn_cfg)
+
+
+def test_preprocess_image_matches_tf_data_decoder(tmp_path):
+    from src.data import _make_decoder, _make_normalizer, preprocess_image
+
+    rng = np.random.default_rng(7)
+    arr = rng.integers(0, 256, size=(96, 80, 3), dtype=np.uint8)
+    img_path = tmp_path / "sample.png"
+    Image.fromarray(arr).save(img_path)
+
+    cfg = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "data.img_height=64",
+        "data.img_width=64",
+        "data.rescale=true",
+        "data.normalize=imagenet",
+        "model.arch=mobilenetv2",
+    ])
+    _, batch_np = preprocess_image(img_path, cfg["data"], cfg["model"]["arch"])
+    decode = _make_decoder(cfg["data"])
+    norm = _make_normalizer(cfg["data"], cfg["model"]["arch"])
+    decoded, _ = decode(str(img_path), 0)
+    tf_batch = norm(decoded[None, ...]).numpy()
+    assert float(np.max(np.abs(batch_np - tf_batch))) < 1e-5
+
+
+def test_disk_cache_key_sensitive_to_seed_and_resize():
+    from src.data import _disk_cache_key
+
+    paths = ["/tmp/a.jpg", "/tmp/b.jpg"]
+    labels = [0, 1]
+    base = cfgmod.default_config()["data"]
+    diff_seed = dict(base, shuffle_seed=99)
+    diff_size = dict(base, img_height=224, img_width=224)
+
+    k1 = _disk_cache_key(paths, labels, base, "train")
+    k2 = _disk_cache_key(paths, labels, diff_seed, "train")
+    k3 = _disk_cache_key(paths, labels, diff_size, "train")
+    assert len({k1, k2, k3}) == 3
+
+
+def test_eval_auto_loads_config_used_yaml(tmp_path, monkeypatch):
+    import keras
+    import main as main_mod
+    import yaml
+
+    run_dir = tmp_path / "m_test"
+    run_dir.mkdir()
+    model = keras.Sequential([
+        keras.Input(shape=(64, 64, 3)),
+        keras.layers.GlobalAveragePooling2D(),
+        keras.layers.Dense(3, activation="softmax"),
+    ])
+    ckpt = run_dir / "best.keras"
+    model.save(ckpt)
+
+    cfg = cfgmod.apply_overrides(cfgmod.default_config(), [
+        "data.img_height=64",
+        "data.img_width=64",
+        "model.arch=mobilenetv3_large",
+        "eval.eval_split=val",
+        "runtime.device=cpu",
+    ])
+    with open(run_dir / "config_used.yaml", "w", encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False)
+
+    captured = {}
+
+    def fake_evaluate(m, used_cfg, run_dir=None, tag=None, quiet=False, **kwargs):
+        captured["arch"] = used_cfg["model"]["arch"]
+        captured["height"] = used_cfg["data"]["img_height"]
+        captured["tag"] = tag
+        return {}
+
+    import src.evaluate as eval_mod
+    monkeypatch.setattr(eval_mod, "evaluate", fake_evaluate)
+    rc = main_mod.main(["--eval", str(ckpt), "--quiet"])
+    assert rc == 0
+    assert captured == {"arch": "mobilenetv3_large", "height": 64, "tag": "val"}
+
+
+def test_tflite_ptq_fp32_fp16_int8_roundtrip(tmp_path):
+    import keras
+    import tensorflow as tf
+    from scripts.export_tflite import convert_keras_to_tflite
+
+    model = keras.Sequential([
+        keras.Input(shape=(32, 32, 3)),
+        keras.layers.Conv2D(8, 3, activation="relu"),
+        keras.layers.GlobalAveragePooling2D(),
+        keras.layers.Dense(3, activation="softmax"),
+    ])
+    rng = np.random.default_rng(42)
+    calib = [rng.uniform(0.0, 1.0, size=(1, 32, 32, 3)).astype(np.float32) for _ in range(8)]
+
+    def rep_fn():
+        for batch in calib:
+            yield [batch]
+
+    sample = calib[0]
+    for q in ("fp32", "fp16", "int8"):
+        tbytes, _ = convert_keras_to_tflite(model, q, rep_dataset_fn=rep_fn if q == "int8" else None)
+        tpath = tmp_path / f"model_{q}.tflite"
+        tpath.write_bytes(tbytes)
+        interp = tf.lite.Interpreter(model_path=str(tpath), num_threads=2)
+        interp.allocate_tensors()
+        in_idx = interp.get_input_details()[0]["index"]
+        out_idx = interp.get_output_details()[0]["index"]
+        interp.set_tensor(in_idx, sample)
+        interp.invoke()
+        out = interp.get_tensor(out_idx)
+        assert out.shape == (1, 3)
+        assert np.isfinite(out).all()

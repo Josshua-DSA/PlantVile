@@ -1,4 +1,5 @@
 """Training: callbacks, fit loop, and the artifacts written to runs/<run_name>/."""
+import csv
 import os
 
 import keras
@@ -8,9 +9,75 @@ from src.model import build_model, compile_model
 from src.utils import make_run_dir, print_kv_table, save_json, set_seed
 
 
+class StepHistoryLogger(keras.callbacks.Callback):
+    """Read-only observer logging mini-batch loss, accuracy, and LR to step_history.csv."""
+
+    def __init__(self, csv_path: str, every: int = 10):
+        super().__init__()
+        self.csv_path = csv_path
+        self.every = max(1, int(every))
+        self.global_step = 0
+        self._epoch = 0
+        self._steps_per_epoch = None
+        self._last_logged_global = -1
+        self._last_row = None
+        self._fh = None
+        self._writer = None
+
+    def _current_lr(self) -> float:
+        opt = getattr(self.model, "optimizer", None)
+        if opt is None:
+            return 0.0
+        lr = opt.learning_rate
+        if callable(lr):
+            lr = lr(opt.iterations)
+        return float(keras.ops.convert_to_numpy(lr))
+
+    def on_train_begin(self, logs=None):
+        os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
+        self._fh = open(self.csv_path, "w", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._fh)
+        self._writer.writerow(["global_step", "epoch", "step_in_epoch", "loss", "accuracy", "learning_rate"])
+        self._steps_per_epoch = (self.params or {}).get("steps")
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._epoch = int(epoch) + 1
+        self._last_row = None
+
+    def on_train_batch_end(self, batch, logs=None):
+        logs = logs or {}
+        self.global_step += 1
+        step_in_epoch = int(batch) + 1
+        loss = float(logs.get("loss", 0.0))
+        acc = float(logs.get("accuracy", 0.0))
+        lr = self._current_lr()
+        row = [self.global_step, self._epoch, step_in_epoch, f"{loss:.6f}", f"{acc:.6f}", f"{lr:.8g}"]
+        self._last_row = row
+        is_periodic = (step_in_epoch == 1) or (self.global_step % self.every == 0)
+        is_last = self._steps_per_epoch is not None and step_in_epoch >= int(self._steps_per_epoch)
+        if (is_periodic or is_last) and self._writer is not None:
+            self._writer.writerow(row)
+            self._last_logged_global = self.global_step
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self._writer is not None and self._last_row is not None:
+            if self._last_logged_global != self._last_row[0]:
+                self._writer.writerow(self._last_row)
+                self._last_logged_global = self._last_row[0]
+        if self._fh is not None:
+            self._fh.flush()
+
+    def on_train_end(self, logs=None):
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+            self._writer = None
+
+
 def build_callbacks(cfg, run_dir: str):
     """ModelCheckpoint + optional EarlyStopping / ReduceLROnPlateau / CSVLogger."""
     train_cfg = cfg["train"]
+    cb_verbose = 1 if cfg["runtime"]["verbose"] == 1 else 0
     callbacks = []
 
     monitor = train_cfg["checkpoint_monitor"]
@@ -19,7 +86,7 @@ def build_callbacks(cfg, run_dir: str):
         monitor=monitor,
         mode="min" if "loss" in monitor else "max",
         save_best_only=train_cfg["save_best_only"],
-        verbose=1,
+        verbose=cb_verbose,
     ))
 
     if train_cfg["early_stopping"]:
@@ -50,6 +117,10 @@ def build_callbacks(cfg, run_dir: str):
     if cfg["runtime"]["log_csv"]:
         callbacks.append(keras.callbacks.CSVLogger(
             os.path.join(run_dir, "history.csv"), append=False))
+        step_every = int(train_cfg.get("log_step_every", 10))
+        if step_every > 0:
+            callbacks.append(StepHistoryLogger(
+                os.path.join(run_dir, "step_history.csv"), every=step_every))
 
     if cfg["runtime"]["tensorboard"]:
         callbacks.append(keras.callbacks.TensorBoard(

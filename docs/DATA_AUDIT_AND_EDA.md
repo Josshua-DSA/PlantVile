@@ -103,17 +103,16 @@ Metrik dihitung pada citra RGB terskala `[0, 1]`: luminansi `0,299 R + 0,587 G +
 
 ---
 
-## 6. Rancangan Hipotesis Eksperimen (H1–H5)
+## 6. Keterkaitan Temuan EDA dengan Rancangan Hipotesis Mobile-Edge (H1–H4)
 
-Seluruh hipotesis berikut mengacu pada protokol eksperimen di [EXPERIMENT_PROTOCOL.md](../EXPERIMENT_PROTOCOL.md) dengan evaluasi wajib pada `--set eval.eval_split=val`:
+Seluruh hipotesis operasional proyek mengacu pada protokol eksperimen terkini di [EXPERIMENT_PROTOCOL.md](../EXPERIMENT_PROTOCOL.md) dengan seleksi di `val` (`--set eval.eval_split=val`) dan evaluasi 1× di `test`:
 
-| ID | Temuan Pemicu dari EDA | `[Hipotesis]` | Variabel Bebas (OFAT) | Bukti Pengujian & Kriteria |
+| ID | Temuan Pemicu dari EDA | `[Hipotesis]` | Desain Pengujian Terkontrol | Bukti & Kriteria |
 | :--- | :--- | :--- | :--- | :--- |
-| **H1** | 10 kelas adalah variasi penyakit Tomat; 2 kelas sangat kecil (`106` & `261` sampel train) | Pretrained `mobilenetv2` (`imagenet`) akan mencapai `val f1_macro` lebih tinggi daripada `simple_cnn` dari nol pada kelas bersampel kecil | `model.arch`: `simple_cnn` vs `mobilenetv2` (`augment=false`) | `val f1_macro`, recall `Potato___healthy` & `Tomato__Tomato_mosaic_virus` |
-| **H2** | Variasi `BrdLum` antar-kelas (`0,477`–`0,604`) dan latar homogen (`BrdStd < 0,10` di beberapa kelas Tomat) | Mengaktifkan augmentasi geometris + `brightness`/`contrast` (`data.augment=true`) akan memperkecil gap `train–val` dan memindahkan fokus aktivasi dari latar ke jaringan daun | `data.augment`: `false` vs `true` | `val f1_macro`, gap `train - val`, dan inspeksi visual **Grad-CAM** |
-| **H3** | Imbalance **21,1×** (`BalWt=9,08` vs `0,43`) dengan 23 sampel `val` pada `Potato___healthy` | `class_weight=balanced` atau `loss=focal` akan meningkatkan *worst-class recall* & `val f1_macro` dibanding `class_weight=none`, dengan potensi *trade-off* pada *precision* kelas minoritas atau kalibrasi probabilitas | `class_weight=none` vs `balanced` vs `loss=focal` | `val f1_macro`, `val_per_class.csv`, dan metrik kalibrasi (**ECE**) |
-| **H4** | Citra asli seragam `256×256` px; resize default `128×128` menghilangkan 75% piksel spasial | Menaikkan resolusi input ke `224×224` akan mengurangi kesalahan antar-penyakit Tomat dengan bercak halus | `data.img_height/width`: `128` vs `224` | `val f1_macro`, daftar **Top Confused Pairs**, waktu training, & ukuran batch |
-| **H5** | Perbedaan halus antar-penyakit dalam 1 spesies (10 kelas Tomat) | Membuka layer atas backbone (`fine_tune_at` + `adamw`, `lr=1e-4`) atau membandingkan `efficientnetb0`/`resnet50` akan menaikkan `val f1_macro` dengan *trade-off* bobot & latensi inferensi UI | `model.arch` & `model.fine_tune_at` | `val f1_macro`, stabilitas 3 seed (`Mean ± SD`), ukuran `.keras`, & latensi CPU |
+| **H1** | 10 kelas merupakan penyakit Tomat dengan bercak visual halus & latar homogen (`BrdStd < 0,10`); resolusi ditingkatkan ke `224×224` | *2-stage fine-tuning* (membuka blok residual atas setelah *head warmup* 10 ep, `AdamW`, `lr=1e-4`) menaikkan `val f1_macro` dan menekan kekeliruan antar-kelas Tomat dibanding *frozen head* | `m1↔m2` (`MobileNetV2`), `m3a↔m3b` (`EfficientNet-B0`), `m4a↔m4b` (`MobileNetV3-Large`) | `val f1_macro`, kurva GD Stage 1→2, `val_confused_pairs.csv` |
+| **H2** | Kebutuhan efisiensi *deployment* web cloud & perangkat *mobile-edge* tanpa mengorbankan akurasi lintas 15 kelas | Pada konfigurasi kontrol identik (`224×224`, 25 ep Stage 2, `ls=0.05`, `class_weight=balanced`), perbandingan `MobileNetV2`, `EfficientNet-B0`, dan `MobileNetV3-Large` mengungkap *trade-off* antara `f1_macro`, ukuran file (MB), dan latency CPU | Bandingkan `m2_mobilenetv2_ft`, `m3b_effnetb0_ft`, dan `m4b_mobilenetv3l_ft` | `f1_macro`, *Bootstrap 95% CI*, *Exact McNemar p-value*, ukuran MB, p50 ms |
+| **H3** | Target optimasi mobile offline (`FP16`/`INT8`) sekaligus keandalan server hemat RAM | Kuantisasi TFLite PTQ `FP16` mempertahankan $\Delta\text{F1} \le 0{,}005$ dengan ukuran ~50% lebih kecil, sedangkan `INT8` (kalibrasi *stratified* 300 citra `train`) menekan ukuran ~70–75% dengan potensi sensitivitas berbeda per arsitektur | Evaluasi `scripts/export_tflite.py` (`keras_fp32`, `tflite_fp32`, `tflite_fp16`, `tflite_int8`) | `ΔF1 vs FP32`, *Exact McNemar*, ukuran `.tflite` (MB), CPU latency (ms) |
+| **H4** | Variasi `BrdLum` tepi (`0,477`–`0,604`) berisiko *shortcut learning* + potensi *miscalibration* probabilitas | Augmentasi fotometris + geometris memusatkan fokus **Grad-CAM** pada gejala daun, dan *5-fold OOF Temperature Scaling* pada logit `val` menekan **ECE** tanpa mengubah akurasi | Audit `gradcam_grid` + *Temperature Scaling* pada logit `val` | Fokus lesi di Grad-CAM & `ECE` *before → after OOF* |
 
 ---
 

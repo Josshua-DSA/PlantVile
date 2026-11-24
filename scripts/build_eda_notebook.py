@@ -7,10 +7,8 @@ The generated notebook uses only standard library + NumPy, Pandas, Pillow,
 Matplotlib, and Seaborn (no TensorFlow/Keras dependency) so it runs smoothly
 both in lightweight local environments and on Kaggle.
 """
-import os
-from pathlib import Path
-
 import nbformat as nbf
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_PATH = ROOT / "notebook" / "data_audit_eda.ipynb"

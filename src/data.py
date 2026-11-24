@@ -62,16 +62,21 @@ def _deduplicate_paths(paths: list[str], labels: list[int]) -> tuple[list[str], 
         for idx, digest in pool.map(_md5_file, candidates):
             digests[idx] = digest
 
-    seen_hashes = set()
+    seen_hashes: dict[str, int] = {}
     kept_paths, kept_labels = [], []
     dropped = 0
     for idx, (fpath, lbl) in enumerate(zip(paths, labels)):
         digest = digests.get(idx)
         if digest is not None:
             if digest in seen_hashes:
+                if seen_hashes[digest] != lbl:
+                    print(
+                        "[WARN] Deduplikasi MD5 lintas-kelas terdeteksi: %s (label %d vs %d)"
+                        % (fpath, seen_hashes[digest], lbl)
+                    )
                 dropped += 1
                 continue
-            seen_hashes.add(digest)
+            seen_hashes[digest] = lbl
         kept_paths.append(fpath)
         kept_labels.append(lbl)
     return kept_paths, kept_labels, dropped
@@ -251,12 +256,13 @@ def _make_normalizer(cfg_data, arch: str):
         return lambda image: image  # decoder already produced [0,1] when rescale=true
     if mode == "imagenet" and arch != "simple_cnn" and channels == 3:
         from keras.applications import (
-            efficientnet, mobilenet_v2, resnet, vgg16,
+            efficientnet, mobilenet_v2, mobilenet_v3, resnet, vgg16,
         )
         preprocess = {
             "vgg16": vgg16.preprocess_input,
             "resnet50": resnet.preprocess_input,
             "mobilenetv2": mobilenet_v2.preprocess_input,
+            "mobilenetv3_large": mobilenet_v3.preprocess_input,
             "efficientnetb0": efficientnet.preprocess_input,
         }[arch]
         # preprocess_input expects 0..255 floats; rescale to that range when needed
@@ -267,38 +273,45 @@ def _make_normalizer(cfg_data, arch: str):
 
 
 def preprocess_image(image_or_path, cfg_data, arch: str):
-    """Load/resize one image with the exact same normalization as tf.data.
+    """Load/resize one image with the exact same tf.image decoding & normalization as tf.data.
 
     Returns (display_rgb_uint8, model_input_batch_float32).
     """
-    from PIL import Image
-
     height = cfg_data["img_height"]
     width = cfg_data["img_width"]
     channels = cfg_data["channels"]
 
     if isinstance(image_or_path, (str, os.PathLike)):
-        with Image.open(image_or_path) as im:
-            rgb = im.convert("RGB")
-            resized_rgb = rgb.resize((width, height), Image.Resampling.BILINEAR)
+        raw = tf.io.read_file(os.fspath(image_or_path))
+        decoded = tf.io.decode_image(raw, channels=channels, expand_animations=False)
+        img_01 = tf.image.convert_image_dtype(decoded, tf.float32)
+        img_01.set_shape([None, None, channels])
+        resized_01 = tf.image.resize(img_01, [height, width], method="bilinear")
+        if channels == 3:
+            rgb_01 = resized_01
+        else:
+            decoded_rgb = tf.io.decode_image(raw, channels=3, expand_animations=False)
+            rgb_01 = tf.image.resize(
+                tf.image.convert_image_dtype(decoded_rgb, tf.float32),
+                [height, width],
+                method="bilinear",
+            )
     else:
-        resized_rgb = image_or_path.convert("RGB").resize(
-            (width, height), Image.Resampling.BILINEAR
-        )
+        rgb_arr = np.asarray(image_or_path.convert("RGB"), dtype=np.float32) / 255.0
+        rgb_01 = tf.image.resize(tf.convert_to_tensor(rgb_arr), [height, width], method="bilinear")
+        if channels == 1:
+            gray_arr = np.asarray(image_or_path.convert("L"), dtype=np.float32)[..., None] / 255.0
+            resized_01 = tf.image.resize(
+                tf.convert_to_tensor(gray_arr), [height, width], method="bilinear"
+            )
+        else:
+            resized_01 = rgb_01
 
-    display_rgb = np.asarray(resized_rgb, dtype=np.uint8)
-    if channels == 1:
-        gray = resized_rgb.convert("L")
-        arr = np.asarray(gray, dtype=np.float32)[..., None]
-    else:
-        arr = display_rgb.astype(np.float32)
-
-    if cfg_data["rescale"]:
-        arr = arr / 255.0
-
-    batch = np.expand_dims(arr, axis=0)
+    display_rgb = np.clip(np.round(rgb_01.numpy() * 255.0), 0, 255).astype(np.uint8)
+    tensor = resized_01 if cfg_data["rescale"] else (resized_01 * 255.0)
+    batch_tf = tf.expand_dims(tensor, axis=0)
     normalize = _make_normalizer(cfg_data, arch)
-    batch = np.asarray(normalize(batch), dtype=np.float32)
+    batch = np.asarray(normalize(batch_tf), dtype=np.float32)
     return display_rgb, batch
 
 
@@ -336,6 +349,26 @@ def _make_augmenter(cfg_data):
     return Sequential(augmenters, name="augment")
 
 
+def _disk_cache_key(paths, labels, cfg_data, split_name: str) -> str:
+    """Compute a deterministic SHA-1 suffix for tf.data disk cache invalidation."""
+    hasher = hashlib.sha1()
+    meta = (
+        split_name,
+        cfg_data["img_height"],
+        cfg_data["img_width"],
+        cfg_data["channels"],
+        cfg_data["rescale"],
+        cfg_data["variant"],
+        cfg_data["deduplicate"],
+        cfg_data["group_same_leaf"],
+        cfg_data["shuffle_seed"],
+    )
+    hasher.update(repr(meta).encode("utf-8"))
+    for p, lbl in zip(paths, labels):
+        hasher.update(f"|{p}:{lbl}".encode("utf-8"))
+    return hasher.hexdigest()[:12]
+
+
 def build_dataset(paths, labels, cfg_data, cfg_runtime, cfg_model,
                   training: bool = False, batch_size=None, one_hot: bool = False,
                   split_name: str = "split"):
@@ -358,12 +391,10 @@ def build_dataset(paths, labels, cfg_data, cfg_runtime, cfg_model,
     if cfg_data["cache"] == "memory":
         ds = ds.cache()
     elif cfg_data["cache"] == "disk":
+        cache_hash = _disk_cache_key(paths, labels, cfg_data, split_name)
         cache_path = os.path.join(
             cfg_runtime["runs_dir"], ".cache",
-            "cache_%s_%d_%d_%s" % (
-                split_name, cfg_data["img_height"], cfg_data["img_width"],
-                cfg_data["variant"],
-            ),
+            "cache_%s_%s" % (split_name, cache_hash),
         )
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         ds = ds.cache(cache_path)

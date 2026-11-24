@@ -1,6 +1,7 @@
 # dataset & output - tidak masuk git
 data/
 runs/
+results/
 
 # python
 __pycache__/
@@ -11,6 +12,7 @@ __pycache__/
 *.keras
 *.h5
 *.weights.h5
+*.tflite
 
 # env & test cache
 venv/

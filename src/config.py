@@ -2,6 +2,7 @@
 wizard, validation and --list-params. Adding a parameter = one line in SPEC."""
 import copy
 import os
+import warnings
 
 import yaml
 
@@ -50,7 +51,7 @@ SPEC = {
     ],
     "model": [
         ("arch", "choice", "mobilenetv2",
-         "simple_cnn|vgg16|mobilenetv2|resnet50|efficientnetb0",
+         "simple_cnn|vgg16|mobilenetv2|mobilenetv3_large|resnet50|efficientnetb0",
          "arsitektur CNN"),
         ("include_top", "bool", False, None, "pakai classifier ImageNet bawaan"),
         ("weights", "choice", "imagenet", "imagenet|none",
@@ -74,6 +75,7 @@ SPEC = {
         ("beta_1", "float", 0.9, None, "beta_1 (adam/adamw/nadam)"),
         ("beta_2", "float", 0.999, None, "beta_2 (adam/adamw/nadam)"),
         ("epsilon", "float", 1e-07, None, "epsilon optimizer"),
+        ("adamw_weight_decay", "float", 0.004, None, "decoupled weight decay untuk adamw"),
         ("loss", "choice", "categorical_crossentropy",
          "categorical_crossentropy|sparse_categorical_crossentropy|focal",
          "fungsi loss"),
@@ -104,6 +106,7 @@ SPEC = {
          "presisi campuran (butuh GPU untuk manfaat nyata)"),
         ("steps_per_epoch", "int", 0, None, "batch per epoch, 0=otomatis"),
         ("validation_steps", "int", 0, None, "batch validasi per epoch, 0=otomatis"),
+        ("log_step_every", "int", 10, None, "interval pencatatan batch_loss ke step_history.csv (0=off)"),
     ],
     "runtime": [
         ("device", "choice", "auto", "cpu|gpu|auto", "perangkat komputasi"),
@@ -276,6 +279,10 @@ def validate(config: dict) -> list:
 
     if train["learning_rate"] <= 0:
         problems.append("train.learning_rate harus > 0")
+    if train["adamw_weight_decay"] < 0:
+        problems.append("train.adamw_weight_decay tidak boleh negatif")
+    if train["log_step_every"] < 0:
+        problems.append("train.log_step_every tidak boleh negatif")
     if train["epochs"] < 1:
         problems.append("train.epochs minimal 1")
     if not 0.0 <= train["label_smoothing"] < 1.0:
@@ -286,6 +293,37 @@ def validate(config: dict) -> list:
         problems.append("model.conv_blocks minimal 1")
     if train["class_weight"] == "manual" and not train["class_weight_manual"]:
         problems.append("class_weight=manual tapi class_weight_manual kosong")
+    if data["normalize"] == "div255" and model["arch"] != "simple_cnn" and model["weights"] == "imagenet":
+        problems.append(
+            "kombinasi berbahaya: data.normalize=div255 dengan pretrained ImageNet backbone "
+            "(gunakan data.normalize=imagenet)"
+        )
+    if not data["rescale"] and data["augment"] and (
+        data["aug_brightness"] > 0 or data["aug_contrast"] > 0
+    ):
+        problems.append(
+            "kombinasi berbahaya: data.rescale=false dengan aug_brightness/aug_contrast > 0 "
+            "(value_range=(0, 1) merusak citra [0, 255])"
+        )
+
+    if train["loss"] == "focal" and train["class_weight"] == "balanced":
+        warnings.warn(
+            "train.loss=focal digabung dengan train.class_weight=balanced berpotensi melakukan double-weighting.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if train["label_smoothing"] > 0 and train["loss"] != "categorical_crossentropy":
+        warnings.warn(
+            "train.label_smoothing > 0 hanya aktif pada categorical_crossentropy (diabaikan oleh loss saat ini).",
+            UserWarning,
+            stacklevel=2,
+        )
+    if model["fine_tune_at"] > 0 and not model["freeze_base"]:
+        warnings.warn(
+            "model.fine_tune_at > 0 diabaikan saat model.freeze_base=false (seluruh backbone terbuka).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if runtime["device"] == "gpu":
         try:

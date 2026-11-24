@@ -11,6 +11,7 @@ Run modes
   python main.py --list-params                    dump semua parameter
 """
 import argparse
+import json
 import os
 import sys
 
@@ -38,6 +39,8 @@ def parse_args(argv=None):
                         help="jangan tampilkan wizard walau tanpa --config")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="lewati konfirmasi interaktif [y/N] (untuk Kaggle / smoke test)")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="ringkas output terminal (cocok untuk Kaggle / batch runner)")
     return parser.parse_args(argv)
 
 
@@ -61,43 +64,72 @@ def confirm_start(cfg):
     return answer in ("y", "ya", "yes")
 
 
-def do_check(cfg):
+def _load_config_from_json(path: str) -> dict:
+    """Load config_used.json into a validated default_config dict."""
+    cfg = cfgmod.default_config()
+    with open(path, "r", encoding="utf-8") as handle:
+        loaded = json.load(handle) or {}
+    for section, values in loaded.items():
+        if section in cfg and isinstance(values, dict):
+            for name, raw in values.items():
+                if name in cfg[section]:
+                    cfg[section][name] = cfgmod.coerce(section, name, raw)
+    return cfg
+
+
+def do_check(cfg, quiet: bool = False):
     """Validate everything short of training: config, dataset, model graph."""
-    print("\n=== MODE CHECK (tidak ada training) ===")
+    if not quiet:
+        print("\n=== MODE CHECK (tidak ada training) ===")
     problems = cfgmod.validate(cfg)
     if problems:
         print("\nConfig bermasalah:")
         for item in problems:
             print("  ! %s" % item)
         return 1
-    print("Config  : OK")
+    if not quiet:
+        print("Config  : OK")
 
     from src.data import prepare_datasets
     from src.model import build_model
     from src.utils import configure_device
 
     device_info = configure_device(cfg["runtime"]["device"])
-    print("Device  : %s" % device_info["active"])
+    if not quiet:
+        print("Device  : %s" % device_info["active"])
 
-    bundle = prepare_datasets(cfg)
+    bundle = prepare_datasets(cfg, verbose=not quiet)
     model = build_model(cfg, bundle["num_classes"])
-    print("\nModel summary (layer pertama & terakhir):")
-    for layer in list(model.layers)[:4]:
-        print("  %-28s %s" % (layer.name, layer.__class__.__name__))
-    print("  ...")
-    for layer in list(model.layers)[-3:]:
-        print("  %-28s %s" % (layer.name, layer.__class__.__name__))
+    if not quiet:
+        print("\nModel summary (layer pertama & terakhir):")
+        for layer in list(model.layers)[:4]:
+            print("  %-28s %s" % (layer.name, layer.__class__.__name__))
+        print("  ...")
+        for layer in list(model.layers)[-3:]:
+            print("  %-28s %s" % (layer.name, layer.__class__.__name__))
 
     batch = next(iter(bundle["train"]["ds"]))
     images, labels = batch
-    print("\nSample batch: images=%s labels=%s" % (images.shape, labels.shape))
-    print("Pixel range : %.3f .. %.3f" % (float(images.numpy().min()),
-                                          float(images.numpy().max())))
-    print("\nSemua siap. Tidak ada training dijalankan.")
+    if quiet:
+        print(
+            "Pre-flight check OK | arch=%s | classes=%d | batch=%s | pixel_range=[%.3f, %.3f]"
+            % (
+                cfg["model"]["arch"],
+                bundle["num_classes"],
+                tuple(images.shape),
+                float(images.numpy().min()),
+                float(images.numpy().max()),
+            )
+        )
+    else:
+        print("\nSample batch: images=%s labels=%s" % (images.shape, labels.shape))
+        print("Pixel range : %.3f .. %.3f" % (float(images.numpy().min()),
+                                              float(images.numpy().max())))
+        print("\nSemua siap. Tidak ada training dijalankan.")
     return 0
 
 
-def do_eval(cfg, model_path):
+def do_eval(cfg, model_path, quiet: bool = False):
     import keras
 
     from src.evaluate import evaluate
@@ -109,8 +141,9 @@ def do_eval(cfg, model_path):
     configure_device(cfg["runtime"]["device"])
     model = keras.models.load_model(model_path, compile=False)
     run_dir = os.path.dirname(os.path.abspath(model_path))
-    print("Model   : %s" % model_path)
-    evaluate(model, cfg, run_dir=run_dir, tag="reload")
+    tag = cfg["eval"]["eval_split"]
+    print("Model   : %s (split=%s)" % (model_path, tag))
+    evaluate(model, cfg, run_dir=run_dir, tag=tag, quiet=quiet)
     return 0
 
 
@@ -128,7 +161,15 @@ def main(argv=None):
                 print("Config tidak ditemukan: %s" % args.config)
                 return 1
             cfg = cfgmod.from_yaml(args.config)
-        elif not args.check and not args.model_path and not args.no_prompt:
+        elif args.model_path:
+            run_dir = os.path.dirname(os.path.abspath(args.model_path))
+            auto_yaml = os.path.join(run_dir, "config_used.yaml")
+            auto_json = os.path.join(run_dir, "config_used.json")
+            if os.path.isfile(auto_yaml):
+                cfg = cfgmod.from_yaml(auto_yaml)
+            elif os.path.isfile(auto_json):
+                cfg = _load_config_from_json(auto_json)
+        elif not args.check and not args.no_prompt:
             cfg = cfgmod.interactive_wizard(cfg)
 
         if args.overrides:
@@ -141,14 +182,14 @@ def main(argv=None):
         print("\nDibatalkan.")
         return 1
 
-    if not args.check and not args.model_path:
+    if not args.check and not args.model_path and not args.quiet:
         print_config(cfg)
 
     if args.check:
-        return do_check(cfg)
+        return do_check(cfg, quiet=args.quiet)
 
     if args.model_path:
-        return do_eval(cfg, args.model_path)
+        return do_eval(cfg, args.model_path, quiet=args.quiet)
 
     problems = cfgmod.validate(cfg)
     if problems:
@@ -167,7 +208,7 @@ def main(argv=None):
     model, history, run_dir, bundle = run_training(cfg)
     evaluate(
         model, cfg, bundle=bundle, run_dir=run_dir, history=history,
-        tag=cfg["eval"]["eval_split"],
+        tag=cfg["eval"]["eval_split"], quiet=args.quiet,
     )
     print("\nSelesai. Semua output ada di: %s" % run_dir)
     return 0

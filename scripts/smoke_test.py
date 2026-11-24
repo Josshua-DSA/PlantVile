@@ -12,7 +12,6 @@ Run:
     python scripts/smoke_test.py
 """
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -88,11 +87,18 @@ def main() -> int:
             "--set", "data.img_height=64", "--set", "data.img_width=64",
             "--set", "runtime.device=cpu",
         ])
+        _run([
+            py, "main.py", "--check", "--config", "configs/default.yaml",
+            "--set", f"data.root={data_dir}",
+            "--set", "model.arch=mobilenetv3_large", "--set", "model.weights=none",
+            "--set", "data.img_height=64", "--set", "data.img_width=64",
+            "--set", "runtime.device=cpu",
+        ])
 
         # 3. 1-epoch mini training (with batched augment + memory cache) + val evaluation + Grad-CAM
         run_name = "smoke_run"
         _run([
-            py, "main.py", "--yes", "--config", "configs/default.yaml",
+            py, "main.py", "--yes", "--quiet", "--config", "configs/default.yaml",
             "--set", f"data.root={data_dir}",
             "--set", f"runtime.runs_dir={runs_dir}",
             "--set", f"runtime.run_name={run_name}",
@@ -104,17 +110,18 @@ def main() -> int:
             "--set", "data.augment=true", "--set", "data.cache=memory",
             "--set", "data.prefetch=0", "--set", "data.normalize=div255",
             "--set", "data.batch_size=8", "--set", "eval.eval_batch_size=8",
-            "--set", "train.epochs=1", "--set", "eval.eval_split=val",
+            "--set", "train.epochs=1", "--set", "train.log_step_every=1",
+            "--set", "eval.eval_split=val",
             "--set", "eval.gradcam_samples=4", "--set", "eval.misclassified_samples=4",
         ])
 
         run_dir = runs_dir / run_name
         _assert_files(run_dir, [
-            "best.keras", "final.keras", "history.csv", "history.json",
+            "best.keras", "final.keras", "history.csv", "history.json", "step_history.csv",
             "config_used.yaml", "config_used.json", "class_names.json", "device.json",
             "val_metrics.json", "val_per_class.json", "val_per_class.csv",
             "val_classification_report.txt", "val_confusion_matrix.png",
-            "val_loss_accuracy.png", "val_sample_predictions.png",
+            "val_loss_accuracy.png", "val_step_gradient_descent.png", "val_sample_predictions.png",
             "val_confused_pairs.json", "val_confused_pairs.csv",
             "val_misclassified.csv", "val_confidence_calibration.png",
             "val_gradcam_grid.png",
@@ -124,15 +131,14 @@ def main() -> int:
         assert "ece" in val_metrics["calibration"]
         assert "gradcam" in val_metrics["plots"]
 
-        # 4. --eval reload on test split
+        # 4. --eval reload on test split WITHOUT --config (verifies C2 auto-load)
         _run([
-            py, "main.py",
+            py, "main.py", "--quiet",
             "--eval", str(run_dir / "best.keras"),
-            "--config", str(run_dir / "config_used.yaml"),
             "--set", "eval.eval_split=test",
             "--set", "runtime.device=cpu",
         ])
-        _assert_files(run_dir, ["reload_metrics.json", "reload_gradcam_grid.png"])
+        _assert_files(run_dir, ["test_metrics.json", "test_gradcam_grid.png"])
 
         # 5. Direct Grad-CAM test on nested frozen MobileNetV2 (offline)
         from src import config as cfgmod

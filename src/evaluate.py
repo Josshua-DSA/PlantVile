@@ -1,10 +1,20 @@
 """Evaluation: metrics, error analysis, calibration, Grad-CAM, and plots."""
 import csv
+import math
 import os
 
 import numpy as np
 
 from src.utils import save_json
+
+
+def label_smoothing_entropy_floor(eps: float, num_classes: int) -> float | None:
+    """Compute theoretical minimum cross-entropy floor H(q) for Keras label smoothing."""
+    if not (0.0 < eps < 1.0) or num_classes <= 1:
+        return None
+    p_other = eps / num_classes
+    p_main = (1.0 - eps) + p_other
+    return float(-(p_main * math.log(p_main) + (num_classes - 1) * p_other * math.log(p_other)))
 
 
 def compute_top_k_accuracy(y_true: np.ndarray, y_pred_probs: np.ndarray, k: int) -> float:
@@ -165,8 +175,75 @@ def _predict(model, dataset):
     return y_true_arr.astype(int), y_pred_arr
 
 
+def _ema(values: np.ndarray, alpha: float = 0.05) -> np.ndarray:
+    """Compute exponential moving average for noisy step-level curves."""
+    if len(values) == 0:
+        return values
+    out = np.empty_like(values, dtype=np.float64)
+    out[0] = float(values[0])
+    for i in range(1, len(values)):
+        out[i] = alpha * float(values[i]) + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+def _plot_step_gradient_descent(
+    step_csv: str,
+    history: dict | None,
+    run_dir: str,
+    tag: str,
+    alpha: float = 0.05,
+) -> str | None:
+    """Render batch-level loss + EMA + epoch-end val_loss markers from step_history.csv."""
+    steps, epochs, losses = [], [], []
+    with open(step_csv, "r", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            steps.append(int(row["global_step"]))
+            epochs.append(int(row["epoch"]))
+            losses.append(float(row["loss"]))
+    if not steps:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    steps_arr = np.asarray(steps, dtype=np.int64)
+    epochs_arr = np.asarray(epochs, dtype=np.int64)
+    losses_arr = np.asarray(losses, dtype=np.float64)
+    ema_arr = _ema(losses_arr, alpha=alpha)
+
+    fig, ax = plt.subplots(figsize=(10, 4.6))
+    ax.plot(steps_arr, losses_arr, color="#5b8db8", alpha=0.35, linewidth=1.0, label="Batch train loss (raw)")
+    ax.plot(steps_arr, ema_arr, color="#1f4e79", linewidth=2.0, label="EMA (alpha=%.2f)" % alpha)
+
+    if history and history.get("val_loss"):
+        epoch_end_steps = []
+        epoch_vals = []
+        val_losses = history["val_loss"]
+        for ep_idx, v_loss in enumerate(val_losses, start=1):
+            mask = epochs_arr == ep_idx
+            if np.any(mask):
+                epoch_end_steps.append(int(steps_arr[mask][-1]))
+                epoch_vals.append(float(v_loss))
+        if epoch_end_steps:
+            ax.plot(epoch_end_steps, epoch_vals, "o--", color="#d95f02", markersize=4.5,
+                    linewidth=1.5, label="Epoch-end val_loss")
+
+    ax.set_title("Mini-Batch Gradient Descent Dynamics (%s)" % tag)
+    ax.set_xlabel("Global Step (mini-batch)")
+    ax.set_ylabel("Loss")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8.5)
+    plt.tight_layout()
+    path = os.path.join(run_dir, "%s_step_gradient_descent.png" % tag)
+    plt.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def _plots(y_true, y_pred, class_names, history, cfg, run_dir, tag):
-    """Confusion matrix + loss/accuracy curves."""
+    """Confusion matrix + loss/accuracy (+LR/floor) + optional step-level GD curves."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -199,27 +276,63 @@ def _plots(y_true, y_pred, class_names, history, cfg, run_dir, tag):
         out["confusion_matrix"] = path
 
     if history:
-        epochs = range(1, len(history.get("loss", [])) + 1)
-        fig = plt.figure(figsize=(12, 4.5))
-        plt.subplot(1, 2, 1)
-        plt.plot(epochs, history.get("loss", []), label="train")
-        if "val_loss" in history:
-            plt.plot(epochs, history["val_loss"], label="val")
-        plt.title("Loss")
-        plt.xlabel("Epoch")
-        plt.legend()
-        plt.subplot(1, 2, 2)
-        plt.plot(epochs, history.get("accuracy", []), label="train")
-        if "val_accuracy" in history:
-            plt.plot(epochs, history["val_accuracy"], label="val")
-        plt.title("Accuracy")
-        plt.xlabel("Epoch")
-        plt.legend()
+        epochs = list(range(1, len(history.get("loss", [])) + 1))
+        lr_key = "learning_rate" if "learning_rate" in history else ("lr" if "lr" in history else None)
+        n_panels = 3 if lr_key else 2
+        fig, axes = plt.subplots(1, n_panels, figsize=(5.4 * n_panels, 4.4))
+
+        ax_loss = axes[0]
+        ax_loss.plot(epochs, history.get("loss", []), label="train")
+        if "val_loss" in history and history["val_loss"]:
+            val_loss = history["val_loss"]
+            ax_loss.plot(epochs, val_loss, label="val")
+            best_ep = int(np.argmin(val_loss)) + 1
+            ax_loss.scatter([best_ep], [min(val_loss)], color="#d95f02", zorder=5,
+                            label="best val (ep %d)" % best_ep)
+        if cfg["train"]["loss"] == "categorical_crossentropy":
+            floor = label_smoothing_entropy_floor(
+                float(cfg["train"]["label_smoothing"]), len(class_names)
+            )
+            if floor is not None:
+                ax_loss.axhline(floor, color="#666666", linestyle="--", linewidth=1.1,
+                                label="LS floor (%.4f)" % floor)
+        ax_loss.set_title("Loss")
+        ax_loss.set_xlabel("Epoch")
+        ax_loss.grid(alpha=0.3)
+        ax_loss.legend(fontsize=8)
+
+        ax_acc = axes[1]
+        ax_acc.plot(epochs, history.get("accuracy", []), label="train")
+        if "val_accuracy" in history and history["val_accuracy"]:
+            val_acc = history["val_accuracy"]
+            ax_acc.plot(epochs, val_acc, label="val")
+            best_ep_a = int(np.argmax(val_acc)) + 1
+            ax_acc.scatter([best_ep_a], [max(val_acc)], color="#1b9e77", zorder=5,
+                           label="best val (ep %d)" % best_ep_a)
+        ax_acc.set_title("Accuracy")
+        ax_acc.set_xlabel("Epoch")
+        ax_acc.grid(alpha=0.3)
+        ax_acc.legend(fontsize=8)
+
+        if lr_key:
+            ax_lr = axes[2]
+            ax_lr.plot(epochs, history[lr_key], color="#7570b3", marker=".")
+            ax_lr.set_yscale("log")
+            ax_lr.set_title("Learning Rate")
+            ax_lr.set_xlabel("Epoch")
+            ax_lr.grid(alpha=0.3)
+
         plt.tight_layout()
         path = os.path.join(run_dir, "%s_loss_accuracy.png" % tag)
         plt.savefig(path, dpi=150)
         plt.close(fig)
         out["loss_accuracy"] = path
+
+    step_csv = os.path.join(run_dir, "step_history.csv")
+    if os.path.isfile(step_csv):
+        step_plot = _plot_step_gradient_descent(step_csv, history, run_dir, tag)
+        if step_plot:
+            out["step_gradient_descent"] = step_plot
 
     return out
 
@@ -424,7 +537,7 @@ def _gradcam_grid(model, paths: list[str], y_true: np.ndarray, y_pred_probs: np.
     return path
 
 
-def evaluate(model, cfg, bundle=None, run_dir=None, history=None, tag=None):
+def evaluate(model, cfg, bundle=None, run_dir=None, history=None, tag=None, quiet: bool = False):
     """Evaluate on cfg['eval']['eval_split']. Writes metrics, error analysis, and plots."""
     from sklearn.metrics import (
         accuracy_score, classification_report, f1_score, precision_score, recall_score,
@@ -435,7 +548,7 @@ def evaluate(model, cfg, bundle=None, run_dir=None, history=None, tag=None):
     ev = cfg["eval"]
     split = ev["eval_split"]
     tag = tag or split
-    bundle = bundle or prepare_datasets(cfg)
+    bundle = bundle or prepare_datasets(cfg, verbose=not quiet)
     run_dir = run_dir or os.path.join(cfg["runtime"]["runs_dir"], "eval")
     os.makedirs(run_dir, exist_ok=True)
 
@@ -483,7 +596,8 @@ def evaluate(model, cfg, bundle=None, run_dir=None, history=None, tag=None):
         report = classification_report(
             y_true, y_hat, labels=labels, target_names=class_names, zero_division=0
         )
-        print("\n" + report)
+        if not quiet:
+            print("\n" + report)
         with open(os.path.join(run_dir, "%s_classification_report.txt" % tag),
                   "w", encoding="utf-8") as handle:
             handle.write(report)
@@ -550,7 +664,7 @@ def evaluate(model, cfg, bundle=None, run_dir=None, history=None, tag=None):
             writer.writeheader()
             writer.writerows(confused_pairs)
 
-        if confused_pairs:
+        if confused_pairs and not quiet:
             print("\nTop confused pairs:")
             for pair in confused_pairs[:10]:
                 print("  %s -> %s : %d (%.2f%%)" % (
