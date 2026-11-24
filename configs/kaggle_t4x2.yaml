@@ -1,0 +1,22 @@
+# Preset optimal untuk Kaggle GPU T4x2 (2x T4 15GB VRAM + 4 vCPU, 30GB RAM)
+# Jalankan di Kaggle:
+#   python main.py --yes --config configs/kaggle_t4x2.yaml
+
+data:
+  root: /kaggle/input/datasets/emmarex/plantdisease/PlantVillage
+  batch_size: 64
+  cache: memory
+  prefetch: 0
+
+train:
+  mixed_precision: mixed_float16
+
+runtime:
+  device: gpu
+  strategy: auto
+  runs_dir: /kaggle/working/runs
+  num_parallel_calls: 0
+
+eval:
+  eval_batch_size: 64
+  eval_split: val

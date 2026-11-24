@@ -15,9 +15,11 @@ data:
   test_split: 0.15
   split_strategy: stratified       # stratified | per_class_tail
   shuffle_seed: 42
+  deduplicate: true
+  group_same_leaf: true
   batch_size: 32
   cache: 'none'                      # none | memory | disk
-  prefetch: 1
+  prefetch: 0                        # 0 = AUTOTUNE
   augment: true
   aug_rotation: 0.04
   aug_width_shift: 0.10
@@ -88,6 +90,7 @@ runtime:
   resume_from: ""
   num_parallel_calls: 4
   deterministic: false
+  strategy: auto                   # auto | none | mirrored
 
 eval:
   eval_batch_size: 32
@@ -98,3 +101,9 @@ eval:
   sample_predictions: 16
   save_plots: true
   eval_split: test                 # val | test | train
+  error_analysis: true
+  misclassified_samples: 16
+  top_confused_pairs: 20
+  gradcam: true
+  gradcam_samples: 8
+  gradcam_alpha: 0.4

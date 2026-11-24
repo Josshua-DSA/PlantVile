@@ -36,6 +36,8 @@ def parse_args(argv=None):
                         help="path model .keras untuk evaluasi saja")
     parser.add_argument("--no-prompt", action="store_true",
                         help="jangan tampilkan wizard walau tanpa --config")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="lewati konfirmasi interaktif [y/N] (untuk Kaggle / smoke test)")
     return parser.parse_args(argv)
 
 
@@ -155,7 +157,7 @@ def main(argv=None):
             print("  ! %s" % item)
         return 1
 
-    if not confirm_start(cfg):
+    if not args.yes and not confirm_start(cfg):
         print("Dibatalkan. Tidak ada training dijalankan.")
         return 0
 
@@ -163,7 +165,10 @@ def main(argv=None):
     from src.train import run_training
 
     model, history, run_dir, bundle = run_training(cfg)
-    evaluate(model, cfg, bundle=bundle, run_dir=run_dir, history=history, tag="test")
+    evaluate(
+        model, cfg, bundle=bundle, run_dir=run_dir, history=history,
+        tag=cfg["eval"]["eval_split"],
+    )
     print("\nSelesai. Semua output ada di: %s" % run_dir)
     return 0
 

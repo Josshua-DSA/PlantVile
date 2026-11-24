@@ -60,28 +60,34 @@ def build_callbacks(cfg, run_dir: str):
 
 def run_training(cfg):
     """Full training run. Returns (model, history_dict, run_dir, bundle)."""
-    from src.utils import configure_device
+    from src.utils import configure_device, get_distribution_strategy
 
     runtime = cfg["runtime"]
     set_seed(runtime["seed"], runtime["deterministic"])
     device_info = configure_device(runtime["device"])
 
-    if cfg["train"]["mixed_precision"] != "off":
-        keras.mixed_precision.set_global_policy(cfg["train"]["mixed_precision"])
+    policy = "float32" if cfg["train"]["mixed_precision"] == "off" else cfg["train"]["mixed_precision"]
+    keras.mixed_precision.set_global_policy(policy)
+
+    strategy, strategy_desc = get_distribution_strategy(runtime["strategy"])
+    device_info["strategy"] = strategy_desc
+    device_info["num_replicas"] = int(strategy.num_replicas_in_sync)
 
     run_dir = make_run_dir(runtime["runs_dir"], runtime["run_name"])
     print("\nRun dir : %s" % run_dir)
     print("Device  : %s" % device_info["active"])
+    print("Strategy: %s" % strategy_desc)
 
     bundle = prepare_datasets(cfg)
-    model = compile_model(build_model(cfg, bundle["num_classes"]), cfg["train"])
+    with strategy.scope():
+        model = compile_model(build_model(cfg, bundle["num_classes"]), cfg["train"])
 
-    if runtime["resume_from"]:
-        if not os.path.isfile(runtime["resume_from"]):
-            raise FileNotFoundError("runtime.resume_from tidak ada: %s"
-                                    % runtime["resume_from"])
-        model.load_weights(runtime["resume_from"])
-        print("Resumed weights dari %s" % runtime["resume_from"])
+        if runtime["resume_from"]:
+            if not os.path.isfile(runtime["resume_from"]):
+                raise FileNotFoundError("runtime.resume_from tidak ada: %s"
+                                        % runtime["resume_from"])
+            model.load_weights(runtime["resume_from"])
+            print("Resumed weights dari %s" % runtime["resume_from"])
 
     fit_kwargs = {
         "epochs": cfg["train"]["epochs"],
@@ -99,7 +105,9 @@ def run_training(cfg):
         [("train", len(bundle["train"]["paths"])),
          ("val", len(bundle["val"]["paths"])),
          ("test", len(bundle["test"]["paths"])),
-         ("class_weight", cfg["train"]["class_weight"])],
+         ("class_weight", cfg["train"]["class_weight"]),
+         ("mixed_precision", policy),
+         ("strategy", strategy_desc)],
         title="Training plan",
     )
 
@@ -107,11 +115,12 @@ def run_training(cfg):
                         validation_data=bundle["val"]["ds"],
                         **fit_kwargs)
 
-    # Final artifacts: best weights, last weights, history, config snapshot
+    # Final artifacts: last-epoch weights in final.keras, best checkpoint in best.keras
+    model.save(os.path.join(run_dir, "final.keras"))
     best_path = os.path.join(run_dir, "best.keras")
     if os.path.isfile(best_path):
-        model.load_weights(best_path)
-    model.save(os.path.join(run_dir, "final.keras"))
+        with strategy.scope():
+            model.load_weights(best_path)
     save_json(os.path.join(run_dir, "history.json"),
               {k: [float(v) for v in vals] for k, vals in history.history.items()})
     save_json(os.path.join(run_dir, "class_names.json"), bundle["class_names"])

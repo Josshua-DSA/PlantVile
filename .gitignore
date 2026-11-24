@@ -12,6 +12,7 @@ __pycache__/
 *.h5
 *.weights.h5
 
-# env
+# env & test cache
 venv/
 .venv/
+.pytest_cache/

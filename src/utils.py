@@ -60,6 +60,21 @@ def configure_device(device: str) -> dict:
     return {"requested": device, "active": active, "gpus": [g.name for g in gpus]}
 
 
+def get_distribution_strategy(strategy_name: str):
+    """Select MirroredStrategy for multi-GPU when enabled, else default single-device."""
+    import tensorflow as tf
+
+    visible_gpus = tf.config.get_visible_devices("GPU")
+    if strategy_name == "none" or len(visible_gpus) <= 1:
+        if strategy_name == "mirrored" and len(visible_gpus) < 2:
+            print("[WARN] runtime.strategy=mirrored tetapi hanya %d GPU terlihat; "
+                  "memakai single-device strategy" % len(visible_gpus))
+        return tf.distribute.get_strategy(), "default (single device)"
+
+    strategy = tf.distribute.MirroredStrategy()
+    return strategy, "MirroredStrategy (%d GPUs)" % len(visible_gpus)
+
+
 def make_run_dir(runs_dir: str, run_name: str) -> str:
     """Create (or reuse) runs/<run_name> and return its absolute path."""
     if not run_name:

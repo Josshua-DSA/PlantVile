@@ -33,7 +33,8 @@ def build_simple_cnn(cfg_model, num_classes, input_shape):
         x = layers.Activation("relu", name="relu_head")(x)
     if cfg["dropout"] > 0:
         x = layers.Dropout(cfg["dropout"], name="dropout")(x)
-    outputs = layers.Dense(num_classes, activation="softmax", name="predictions")(x)
+    outputs = layers.Dense(num_classes, activation="softmax", dtype="float32",
+                           name="predictions")(x)
     return keras.Model(inputs, outputs, name="simple_cnn")
 
 
@@ -77,7 +78,8 @@ def build_transfer_model(cfg_model, num_classes, input_shape):
         x = layers.Activation("relu", name="relu_head")(x)
     if cfg["dropout"] > 0:
         x = layers.Dropout(cfg["dropout"], name="dropout")(x)
-    outputs = layers.Dense(num_classes, activation="softmax", name="predictions")(x)
+    outputs = layers.Dense(num_classes, activation="softmax", dtype="float32",
+                           name="predictions")(x)
     return keras.Model(inputs, outputs, name=cfg["arch"])
 
 
