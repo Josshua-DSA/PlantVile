@@ -82,6 +82,12 @@ import sys
 import time
 from pathlib import Path
 
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+from IPython.display import Image as IPyImage
+from IPython.display import display as ipy_display
+
 REPO_URL = "https://github.com/Josshua-DSA/PlantVile.git"
 BRANCH = "experiment-arfi"
 
@@ -99,6 +105,25 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_ROOT = next((p for p in DATA_ROOT_CANDIDATES if p.is_dir()), None)
 assert DATA_ROOT is not None, f"Dataset tidak ditemukan di: {[str(p) for p in DATA_ROOT_CANDIDATES]}"
+DATA_ROOT = DATA_ROOT.resolve()
+
+
+def run_stream(cmd: list[str]) -> None:
+    \"\"\"Run subprocess and stream combined stdout/stderr live into notebook cell output.\"\"\"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    rc = proc.wait()
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd)
+
 
 if shutil.which("nvidia-smi"):
     smi = subprocess.run(
@@ -137,21 +162,18 @@ print(f"Free Disk   : {disk.free / (1024**3):.2f} GB / {disk.total / (1024**3):.
 
     cells.append(code("""if (WORK_DIR / ".git").is_dir():
     print(f"Updating existing repo di {WORK_DIR}...")
-    subprocess.run(["git", "-C", str(WORK_DIR), "fetch", "origin", BRANCH], check=True)
-    subprocess.run(["git", "-C", str(WORK_DIR), "checkout", BRANCH], check=True)
-    subprocess.run(["git", "-C", str(WORK_DIR), "pull", "origin", BRANCH], check=True)
+    run_stream(["git", "-C", str(WORK_DIR), "fetch", "origin", BRANCH])
+    run_stream(["git", "-C", str(WORK_DIR), "checkout", BRANCH])
+    run_stream(["git", "-C", str(WORK_DIR), "pull", "origin", BRANCH])
 else:
     print(f"Cloning {REPO_URL} (branch={BRANCH}) ke {WORK_DIR}...")
-    subprocess.run(
-        ["git", "clone", "-b", BRANCH, "--single-branch", REPO_URL, str(WORK_DIR)],
-        check=True,
-    )
+    run_stream(["git", "clone", "-b", BRANCH, "--single-branch", REPO_URL, str(WORK_DIR)])
 
 os.chdir(WORK_DIR)
 if str(WORK_DIR) not in sys.path:
     sys.path.insert(0, str(WORK_DIR))
 
-subprocess.run(["git", "log", "-n", "3", "--oneline"], check=True)
+run_stream(["git", "log", "-n", "3", "--oneline"])
 """))
 
     # ---------------------------------------------------------------- Cell 3
@@ -166,10 +188,7 @@ subprocess.run(["git", "log", "-n", "3", "--oneline"], check=True)
     cells.append(code("""import pandas as pd
 
 audit_out = RUNS_DIR / "dataset_audit.json"
-subprocess.run(
-    [sys.executable, "scripts/audit_dataset.py", "--root", str(DATA_ROOT), "--out", str(audit_out)],
-    check=True,
-)
+run_stream([sys.executable, "scripts/audit_dataset.py", "--root", str(DATA_ROOT), "--out", str(audit_out)])
 
 audit_data = json.loads(audit_out.read_text(encoding="utf-8"))
 summary_rows = [
@@ -205,7 +224,7 @@ check_cmd = [
 if not HAS_GPU:
     check_cmd += ["--set", "runtime.device=cpu"]
 
-subprocess.run(check_cmd, check=True)
+run_stream(check_cmd)
 
 if RUN_PILOT:
     t0 = time.time()
@@ -218,10 +237,11 @@ if RUN_PILOT:
         "--set", "data.max_per_class=200",
         "--set", "train.epochs=2",
         "--set", "eval.eval_split=val",
+        "--set", "runtime.verbose=2",
     ]
     if not HAS_GPU:
         pilot_cmd += ["--set", "runtime.device=cpu"]
-    subprocess.run(pilot_cmd, check=True)
+    run_stream(pilot_cmd)
     print(f"Pilot selesai dalam {time.time() - t0:.1f} detik.")
 """))
 
@@ -306,6 +326,7 @@ def build_run_command(run_id: str) -> list[str]:
         "--set", f"runtime.run_name={run_id}",
         "--set", "eval.eval_split=val",
         "--set", f"runtime.strategy={STRATEGY_MODE}",
+        "--set", "runtime.verbose=2",
     ]
     if not HAS_GPU:
         cmd += ["--set", "runtime.device=cpu"]
@@ -352,7 +373,7 @@ else:
         cmd = build_run_command(rid)
         print(f"\\n{'=' * 72}\\n[RUN] {rid} — {EXP_REGISTRY[rid]['desc']}\\n{'=' * 72}")
         t0 = time.time()
-        subprocess.run(cmd, check=True)
+        run_stream(cmd)
         print(f"[DONE] {rid} selesai dalam {(time.time() - t0) / 60:.2f} menit.")
 """))
 
@@ -441,12 +462,10 @@ else:
 - **Disimpan ke Output Kaggle:** Tidak ada (membaca artefak dari Cell 6).
 """))
 
-    cells.append(code("""from IPython.display import Image as IPyImage
-from IPython.display import display as ipy_display
+    cells.append(code("""INSPECT_RUN = ""  # kosong = otomatis run terbaik di leaderboard
 
-INSPECT_RUN = ""  # kosong = otomatis run terbaik di leaderboard
-
-target_run = INSPECT_RUN or (df_board.iloc[0]["run_id"] if len(df_board) else "")
+board_df = globals().get("df_board", None)
+target_run = INSPECT_RUN or (board_df.iloc[0]["run_id"] if board_df is not None and len(board_df) else "")
 if not target_run:
     print("Belum ada run untuk diinspeksi.")
 else:
@@ -508,7 +527,7 @@ else:
     if not HAS_GPU:
         eval_cmd += ["--set", "runtime.device=cpu"]
 
-    subprocess.run(eval_cmd, check=True)
+    run_stream(eval_cmd)
 
     reload_metrics = json.loads((final_dir / "reload_metrics.json").read_text(encoding="utf-8"))
     print(
@@ -539,7 +558,10 @@ else:
 
 BUILD_ZIPS = True
 PRUNE_EXTRA_FINAL_KERAS = False  # True = hapus final.keras milik run lain jika disk mepet
-BUNDLE_RUN_NAME = FINAL_RUN_NAME or (df_board.iloc[0]["run_id"] if len(df_board) else "")
+board_df = globals().get("df_board", None)
+BUNDLE_RUN_NAME = globals().get("FINAL_RUN_NAME", "") or (
+    board_df.iloc[0]["run_id"] if board_df is not None and len(board_df) else ""
+)
 
 if PRUNE_EXTRA_FINAL_KERAS and BUNDLE_RUN_NAME:
     for fk in RUNS_DIR.glob("*/final.keras"):
