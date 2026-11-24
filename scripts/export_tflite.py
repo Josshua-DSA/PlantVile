@@ -13,8 +13,13 @@ import logging
 import math
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 

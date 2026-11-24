@@ -1,4 +1,5 @@
 """Deterministic unit tests for error analysis, config validation, and dataset audit."""
+import warnings
 import numpy as np
 from PIL import Image
 
@@ -230,8 +231,6 @@ def test_mobilenetv3_large_build_and_gradcam(tmp_path):
 
 
 def test_config_validate_dangerous_combinations_and_warnings():
-    import pytest
-
     bad_norm = cfgmod.apply_overrides(cfgmod.default_config(), [
         "model.arch=mobilenetv2",
         "model.weights=imagenet",
@@ -253,8 +252,10 @@ def test_config_validate_dangerous_combinations_and_warnings():
         "train.class_weight=balanced",
         "train.label_smoothing=0.05",
     ])
-    with pytest.warns(UserWarning):
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
         cfgmod.validate(warn_cfg)
+        assert any(issubclass(w.category, UserWarning) for w in recorded)
 
 
 def test_preprocess_image_matches_tf_data_decoder(tmp_path):
@@ -295,7 +296,8 @@ def test_disk_cache_key_sensitive_to_seed_and_resize():
     assert len({k1, k2, k3}) == 3
 
 
-def test_eval_auto_loads_config_used_yaml(tmp_path, monkeypatch):
+def test_eval_auto_loads_config_used_yaml(tmp_path):
+    from unittest.mock import patch
     import keras
     import main as main_mod
     import yaml
@@ -329,8 +331,8 @@ def test_eval_auto_loads_config_used_yaml(tmp_path, monkeypatch):
         return {}
 
     import src.evaluate as eval_mod
-    monkeypatch.setattr(eval_mod, "evaluate", fake_evaluate)
-    rc = main_mod.main(["--eval", str(ckpt), "--quiet"])
+    with patch.object(eval_mod, "evaluate", side_effect=fake_evaluate):
+        rc = main_mod.main(["--eval", str(ckpt), "--quiet"])
     assert rc == 0
     assert captured == {"arch": "mobilenetv3_large", "height": 64, "tag": "val"}
 
