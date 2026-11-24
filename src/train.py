@@ -4,7 +4,7 @@ import os
 
 import keras
 
-from src.data import prepare_datasets
+from src.data import _make_augmenter, _make_normalizer, prepare_datasets
 from src.model import build_model, compile_model
 from src.utils import make_run_dir, print_kv_table, save_json, set_seed
 
@@ -20,7 +20,7 @@ class StepHistoryLogger(keras.callbacks.Callback):
         self._epoch = 0
         self._steps_per_epoch = None
         self._last_logged_global = -1
-        self._last_row = None
+        self._pending_step = None
         self._fh = None
         self._writer = None
 
@@ -39,31 +39,50 @@ class StepHistoryLogger(keras.callbacks.Callback):
         self._writer = csv.writer(self._fh)
         self._writer.writerow(["global_step", "epoch", "step_in_epoch", "loss", "accuracy", "learning_rate"])
         self._steps_per_epoch = (self.params or {}).get("steps")
+        self._pending_step = None
 
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = int(epoch) + 1
-        self._last_row = None
+        self._pending_step = None
 
     def on_train_batch_end(self, batch, logs=None):
         logs = logs or {}
         self.global_step += 1
         step_in_epoch = int(batch) + 1
+        is_periodic = (step_in_epoch == 1) or (self.global_step % self.every == 0)
+        is_last = self._steps_per_epoch is not None and step_in_epoch >= int(self._steps_per_epoch)
+        if not (is_periodic or is_last):
+            # Defer LR device-to-host sync unless needed as an unknown-steps epoch-end fallback.
+            if self._steps_per_epoch is None:
+                self._pending_step = (
+                    self.global_step,
+                    self._epoch,
+                    step_in_epoch,
+                    float(logs.get("loss", 0.0)),
+                    float(logs.get("accuracy", 0.0)),
+                )
+            return
+
         loss = float(logs.get("loss", 0.0))
         acc = float(logs.get("accuracy", 0.0))
         lr = self._current_lr()
         row = [self.global_step, self._epoch, step_in_epoch, f"{loss:.6f}", f"{acc:.6f}", f"{lr:.8g}"]
-        self._last_row = row
-        is_periodic = (step_in_epoch == 1) or (self.global_step % self.every == 0)
-        is_last = self._steps_per_epoch is not None and step_in_epoch >= int(self._steps_per_epoch)
-        if (is_periodic or is_last) and self._writer is not None:
+        if self._writer is not None:
             self._writer.writerow(row)
             self._last_logged_global = self.global_step
+        self._pending_step = None
 
     def on_epoch_end(self, epoch, logs=None):
-        if self._writer is not None and self._last_row is not None:
-            if self._last_logged_global != self._last_row[0]:
-                self._writer.writerow(self._last_row)
-                self._last_logged_global = self._last_row[0]
+        if (
+            self._writer is not None
+            and self._pending_step is not None
+            and self._last_logged_global != self._pending_step[0]
+        ):
+            g_step, ep, step_ep, loss, acc = self._pending_step
+            lr = self._current_lr()
+            self._writer.writerow([g_step, ep, step_ep, f"{loss:.6f}", f"{acc:.6f}", f"{lr:.8g}"])
+            self._last_logged_global = g_step
+        self._pending_step = None
         if self._fh is not None:
             self._fh.flush()
 
@@ -74,20 +93,95 @@ class StepHistoryLogger(keras.callbacks.Callback):
             self._writer = None
 
 
-def build_callbacks(cfg, run_dir: str):
+class CoreModelCheckpoint(keras.callbacks.Callback):
+    """Save the clean core_model (without GPU augmentation wrapper) on monitored metric improvement."""
+
+    def __init__(
+        self,
+        target_model,
+        filepath: str,
+        monitor: str = "val_loss",
+        mode: str = "min",
+        save_best_only: bool = True,
+        verbose: int = 0,
+    ):
+        super().__init__()
+        self.target_model = target_model
+        self.filepath = filepath
+        self.monitor = monitor
+        self.mode = mode
+        self.save_best_only = save_best_only
+        self.verbose = verbose
+        self.best = float("inf") if mode == "min" else float("-inf")
+
+    def on_epoch_end(self, epoch, logs=None):
+        current = (logs or {}).get(self.monitor)
+        if current is None:
+            return
+        current_val = float(current)
+        improved = (current_val < self.best) if self.mode == "min" else (current_val > self.best)
+        if improved or not self.save_best_only:
+            if improved:
+                prev = self.best
+                self.best = current_val
+                if self.verbose:
+                    print(
+                        f"\nEpoch {int(epoch) + 1}: {self.monitor} improved from {prev:.5f} "
+                        f"to {current_val:.5f}, saving model to {self.filepath}"
+                    )
+            self.target_model.save(self.filepath)
+
+
+class _GPUAugmentedModel(keras.Model):
+    """Training-only wrapper that runs float32 augmentation and normalization on the accelerator."""
+
+    def __init__(self, core_model, augment_layer, normalize_fn):
+        super().__init__(name=f"{core_model.name}_gpu_aug")
+        self.core_model = core_model
+        self.augment_layer = augment_layer
+        self.normalize_fn = normalize_fn
+
+    def build(self, input_shape):
+        if not self.augment_layer.built:
+            self.augment_layer.build(input_shape)
+        if not self.core_model.built:
+            self.core_model.build(input_shape)
+        self.built = True
+
+    def call(self, inputs, training=False):
+        if training:
+            x = self.augment_layer(inputs, training=True)
+            x = self.normalize_fn(x)
+            return self.core_model(x, training=True)
+        return self.core_model(inputs, training=False)
+
+
+def build_callbacks(cfg, run_dir: str, target_model=None):
     """ModelCheckpoint + optional EarlyStopping / ReduceLROnPlateau / CSVLogger."""
     train_cfg = cfg["train"]
     cb_verbose = 1 if cfg["runtime"]["verbose"] == 1 else 0
     callbacks = []
 
     monitor = train_cfg["checkpoint_monitor"]
-    callbacks.append(keras.callbacks.ModelCheckpoint(
-        filepath=os.path.join(run_dir, "best.keras"),
-        monitor=monitor,
-        mode="min" if "loss" in monitor else "max",
-        save_best_only=train_cfg["save_best_only"],
-        verbose=cb_verbose,
-    ))
+    ckpt_path = os.path.join(run_dir, "best.keras")
+    ckpt_mode = "min" if "loss" in monitor else "max"
+    if target_model is not None:
+        callbacks.append(CoreModelCheckpoint(
+            target_model=target_model,
+            filepath=ckpt_path,
+            monitor=monitor,
+            mode=ckpt_mode,
+            save_best_only=train_cfg["save_best_only"],
+            verbose=cb_verbose,
+        ))
+    else:
+        callbacks.append(keras.callbacks.ModelCheckpoint(
+            filepath=ckpt_path,
+            monitor=monitor,
+            mode=ckpt_mode,
+            save_best_only=train_cfg["save_best_only"],
+            verbose=cb_verbose,
+        ))
 
     if train_cfg["early_stopping"]:
         mode = train_cfg["es_mode"]
@@ -149,20 +243,31 @@ def run_training(cfg):
     print("Device  : %s" % device_info["active"])
     print("Strategy: %s" % strategy_desc)
 
-    bundle = prepare_datasets(cfg)
+    use_model_augment = bool(cfg["data"]["augment"])
+    bundle = prepare_datasets(cfg, augment_in_pipeline=not use_model_augment)
     with strategy.scope():
-        model = compile_model(build_model(cfg, bundle["num_classes"]), cfg["train"])
+        core_model = build_model(cfg, bundle["num_classes"])
 
         if runtime["resume_from"]:
             if not os.path.isfile(runtime["resume_from"]):
                 raise FileNotFoundError("runtime.resume_from tidak ada: %s"
                                         % runtime["resume_from"])
-            model.load_weights(runtime["resume_from"])
+            core_model.load_weights(runtime["resume_from"])
             print("Resumed weights dari %s" % runtime["resume_from"])
+
+        train_model = core_model
+        if use_model_augment:
+            augment_layer = _make_augmenter(cfg["data"], dtype="float32")
+            if augment_layer is not None:
+                normalize_fn = _make_normalizer(cfg["data"], cfg["model"]["arch"])
+                train_model = _GPUAugmentedModel(core_model, augment_layer, normalize_fn)
+                print("Augment : in-model (GPU/accelerator, float32)")
+
+        compile_model(train_model, cfg["train"])
 
     fit_kwargs = {
         "epochs": cfg["train"]["epochs"],
-        "callbacks": build_callbacks(cfg, run_dir),
+        "callbacks": build_callbacks(cfg, run_dir, target_model=core_model),
         "verbose": runtime["verbose"],
     }
     if cfg["train"]["steps_per_epoch"] > 0:
@@ -182,16 +287,16 @@ def run_training(cfg):
         title="Training plan",
     )
 
-    history = model.fit(bundle["train"]["ds"],
-                        validation_data=bundle["val"]["ds"],
-                        **fit_kwargs)
+    history = train_model.fit(bundle["train"]["ds"],
+                              validation_data=bundle["val"]["ds"],
+                              **fit_kwargs)
 
     # Final artifacts: last-epoch weights in final.keras, best checkpoint in best.keras
-    model.save(os.path.join(run_dir, "final.keras"))
+    core_model.save(os.path.join(run_dir, "final.keras"))
     best_path = os.path.join(run_dir, "best.keras")
     if os.path.isfile(best_path):
         with strategy.scope():
-            model.load_weights(best_path)
+            core_model.load_weights(best_path)
     save_json(os.path.join(run_dir, "history.json"),
               {k: [float(v) for v in vals] for k, vals in history.history.items()})
     save_json(os.path.join(run_dir, "class_names.json"), bundle["class_names"])
@@ -203,4 +308,4 @@ def run_training(cfg):
         yaml.safe_dump(cfg, handle, sort_keys=False)
 
     print("\nTraining selesai. Output: %s" % run_dir)
-    return model, history.history, run_dir, bundle
+    return core_model, history.history, run_dir, bundle

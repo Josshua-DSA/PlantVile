@@ -315,35 +315,37 @@ def preprocess_image(image_or_path, cfg_data, arch: str):
     return display_rgb, batch
 
 
-def _make_augmenter(cfg_data):
+def _make_augmenter(cfg_data, dtype=None):
+    """Build Keras spatial/color augmentation Sequential; optional float32 dtype for GPU mixed_float16."""
     from keras import layers, Sequential
 
+    layer_kwargs = {"dtype": dtype} if dtype is not None else {}
     augmenters = []
     if cfg_data["aug_rotation"] > 0:
-        augmenters.append(layers.RandomRotation(cfg_data["aug_rotation"]))
+        augmenters.append(layers.RandomRotation(cfg_data["aug_rotation"], **layer_kwargs))
     if cfg_data["aug_width_shift"] > 0 or cfg_data["aug_height_shift"] > 0:
         augmenters.append(layers.RandomTranslation(
             cfg_data["aug_height_shift"], cfg_data["aug_width_shift"],
-            fill_mode=cfg_data["aug_fill_mode"]))
+            fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_zoom"] > 0:
         augmenters.append(layers.RandomZoom(cfg_data["aug_zoom"],
-                                            fill_mode=cfg_data["aug_fill_mode"]))
+                                            fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_shear"] > 0:
         shear = cfg_data["aug_shear"]
         augmenters.append(layers.RandomShear(shear, shear,
-                                             fill_mode=cfg_data["aug_fill_mode"]))
+                                             fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_hflip"] and cfg_data["aug_vflip"]:
-        augmenters.append(layers.RandomFlip("horizontal_and_vertical"))
+        augmenters.append(layers.RandomFlip("horizontal_and_vertical", **layer_kwargs))
     elif cfg_data["aug_hflip"]:
-        augmenters.append(layers.RandomFlip("horizontal"))
+        augmenters.append(layers.RandomFlip("horizontal", **layer_kwargs))
     elif cfg_data["aug_vflip"]:
-        augmenters.append(layers.RandomFlip("vertical"))
+        augmenters.append(layers.RandomFlip("vertical", **layer_kwargs))
     if cfg_data["aug_brightness"] > 0:
         augmenters.append(layers.RandomBrightness(cfg_data["aug_brightness"],
-                                                  value_range=(0.0, 1.0)))
+                                                  value_range=(0.0, 1.0), **layer_kwargs))
     if cfg_data["aug_contrast"] > 0:
         augmenters.append(layers.RandomContrast(cfg_data["aug_contrast"],
-                                                value_range=(0.0, 1.0)))
+                                                value_range=(0.0, 1.0), **layer_kwargs))
     if not augmenters:
         return None
     return Sequential(augmenters, name="augment")
@@ -371,12 +373,14 @@ def _disk_cache_key(paths, labels, cfg_data, split_name: str) -> str:
 
 def build_dataset(paths, labels, cfg_data, cfg_runtime, cfg_model,
                   training: bool = False, batch_size=None, one_hot: bool = False,
-                  split_name: str = "split"):
-    """tf.data pipeline: decode -> cache -> shuffle(train) -> batch -> augment(train) -> normalize -> prefetch."""
+                  split_name: str = "split", augment_in_pipeline: bool = True):
+    """tf.data pipeline: decode -> cache -> shuffle(train) -> batch -> post-batch -> prefetch."""
     batch_size = batch_size or cfg_data["batch_size"]
     decode = _make_decoder(cfg_data)
+    run_aug_in_pipe = bool(training and cfg_data["augment"] and augment_in_pipeline)
+    skip_norm_for_model_aug = bool(training and cfg_data["augment"] and not augment_in_pipeline)
     normalize = _make_normalizer(cfg_data, cfg_model["arch"])
-    augment = _make_augmenter(cfg_data) if (training and cfg_data["augment"]) else None
+    augment = _make_augmenter(cfg_data) if run_aug_in_pipe else None
     num_classes = cfg_runtime.get("_num_classes", 0)
     par_calls = (
         AUTOTUNE
@@ -407,19 +411,26 @@ def build_dataset(paths, labels, cfg_data, cfg_runtime, cfg_model,
         )
 
     ds = ds.batch(batch_size, drop_remainder=False)
-    # Augment while pixels are still in [0,1] (batched on CPU/GPU) before ImageNet scaling.
-    if augment is not None:
-        ds = ds.map(
-            lambda x, y: (augment(x, training=True), y),
-            num_parallel_calls=par_calls,
-        )
 
-    ds = ds.map(lambda x, y: (normalize(x), y), num_parallel_calls=par_calls)
-    if one_hot and num_classes:
-        ds = ds.map(
-            lambda x, y: (x, tf.one_hot(y, num_classes)),
-            num_parallel_calls=par_calls,
-        )
+    apply_one_hot = bool(one_hot and num_classes)
+    if skip_norm_for_model_aug:
+        # When augmentation + normalization execute inside _GPUAugmentedModel, keep pixels un-normalized here.
+        if apply_one_hot:
+            ds = ds.map(
+                lambda x, y: (x, tf.one_hot(y, num_classes)),
+                num_parallel_calls=par_calls,
+            )
+    else:
+        def _post_batch(x, y):
+            if augment is not None:
+                x = augment(x, training=True)
+            x = normalize(x)
+            if apply_one_hot:
+                y = tf.one_hot(y, num_classes)
+            return x, y
+
+        ds = ds.map(_post_batch, num_parallel_calls=par_calls)
+
     ds = ds.prefetch(prefetch_buf)
     return ds
 
@@ -450,7 +461,7 @@ def compute_class_weights(labels, num_classes, mode="balanced", manual=None):
 
 
 # --------------------------------------------------------------------------- bundle
-def prepare_datasets(cfg, verbose: bool = True):
+def prepare_datasets(cfg, verbose: bool = True, augment_in_pipeline: bool = True):
     """Scan + split + build three pipelines. Returns a dict describing everything."""
     data, runtime, model, train_cfg = (
         cfg["data"], cfg["runtime"], cfg["model"], cfg["train"]
@@ -478,8 +489,11 @@ def prepare_datasets(cfg, verbose: bool = True):
     runtime_ctx["_num_classes"] = len(class_names)
 
     def make(p, l, training, split_name):
-        return build_dataset(p, l, data, runtime_ctx, model,
-                             training=training, one_hot=one_hot, split_name=split_name)
+        return build_dataset(
+            p, l, data, runtime_ctx, model,
+            training=training, one_hot=one_hot, split_name=split_name,
+            augment_in_pipeline=augment_in_pipeline if training else True,
+        )
 
     train_ds = make(train_paths, train_labels, True, "train")
     val_ds = make(val_paths, val_labels, False, "val")

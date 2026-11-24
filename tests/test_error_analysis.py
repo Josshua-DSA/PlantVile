@@ -367,3 +367,104 @@ def test_tflite_ptq_fp32_fp16_int8_roundtrip(tmp_path):
         out = interp.get_tensor(out_idx)
         assert out.shape == (1, 3)
         assert np.isfinite(out).all()
+
+
+def test_gpu_augmented_model_trains_and_saves_clean_core_model(tmp_path):
+    import keras
+    import tensorflow as tf
+    from src import config as cfgmod
+    from src.data import _make_augmenter, _make_normalizer
+    from src.model import build_model, compile_model
+    from src.train import CoreModelCheckpoint, _GPUAugmentedModel
+
+    prev_policy = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        cfg = cfgmod.default_config()
+        cfg["data"]["img_height"] = 32
+        cfg["data"]["img_width"] = 32
+        cfg["data"]["augment"] = True
+        cfg["data"]["normalize"] = "imagenet"
+        cfg["model"]["arch"] = "simple_cnn"
+        cfg["model"]["conv_blocks"] = 2
+        cfg["model"]["filters_base"] = 8
+        cfg["model"]["dense_units"] = 16
+        cfg["model"]["l2_weight_decay"] = 0.001
+
+        core_model = build_model(cfg, num_classes=3)
+        aug_layer = _make_augmenter(cfg["data"], dtype="float32")
+        assert aug_layer is not None
+        norm_fn = _make_normalizer(cfg["data"], cfg["model"]["arch"])
+        train_model = _GPUAugmentedModel(core_model, aug_layer, norm_fn)
+        compile_model(train_model, cfg["train"])
+
+        rng = np.random.default_rng(7)
+        x_train = rng.uniform(0.0, 1.0, size=(8, 32, 32, 3)).astype(np.float32)
+        y_train = np.eye(3, dtype=np.float32)[np.arange(8) % 3]
+        x_val_raw = rng.uniform(0.0, 1.0, size=(4, 32, 32, 3)).astype(np.float32)
+        x_val_norm = norm_fn(tf.constant(x_val_raw)).numpy()
+        y_val = np.eye(3, dtype=np.float32)[np.arange(4) % 3]
+
+        _ = train_model(tf.constant(x_train[:2]), training=True)
+        assert len(train_model.trainable_weights) == len(core_model.trainable_weights)
+        assert len(train_model.losses) == len(core_model.losses) > 0
+
+        ckpt_path = tmp_path / "best.keras"
+        ckpt_cb = CoreModelCheckpoint(
+            target_model=core_model,
+            filepath=str(ckpt_path),
+            monitor="val_loss",
+            mode="min",
+            save_best_only=True,
+        )
+        train_model.fit(
+            x_train,
+            y_train,
+            validation_data=(x_val_norm, y_val),
+            batch_size=4,
+            epochs=1,
+            callbacks=[ckpt_cb],
+            verbose=0,
+        )
+
+        assert ckpt_path.is_file()
+        loaded = keras.models.load_model(ckpt_path, compile=False)
+        layer_names = [layer.name for layer in loaded.layers]
+        assert "augment" not in layer_names
+        assert not any(name.startswith("random_") for name in layer_names)
+        np.testing.assert_allclose(
+            loaded.predict(x_val_norm, verbose=0),
+            core_model.predict(x_val_norm, verbose=0),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+    finally:
+        keras.mixed_precision.set_global_policy(prev_policy)
+
+
+def test_step_history_logger_throttles_lr_reads(tmp_path):
+    import csv
+    from src.train import StepHistoryLogger
+
+    csv_path = tmp_path / "step_history.csv"
+    logger = StepHistoryLogger(str(csv_path), every=5)
+    logger.set_params({"steps": 10})
+
+    calls = {"n": 0}
+
+    def fake_lr() -> float:
+        calls["n"] += 1
+        return 0.001
+
+    logger._current_lr = fake_lr
+    logger.on_train_begin()
+    logger.on_epoch_begin(0)
+    for batch in range(10):
+        logger.on_train_batch_end(batch, logs={"loss": 1.0 - batch * 0.05, "accuracy": 0.5 + batch * 0.03})
+    logger.on_epoch_end(0)
+    logger.on_train_end()
+
+    assert calls["n"] == 3
+    with open(csv_path, encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [int(r["global_step"]) for r in rows] == [1, 5, 10]
