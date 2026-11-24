@@ -131,9 +131,11 @@ OVERRIDES = [
     "data.test_split=0.15",                    # float
     "data.split_strategy=stratified",          # stratified | per_class_tail
     "data.shuffle_seed=42",                    # int
+    "data.deduplicate=true",                   # bool
+    "data.group_same_leaf=true",               # bool
     "data.batch_size=32",                      # int
     "data.cache=none",                         # none | memory | disk
-    "data.prefetch=1",                         # int
+    "data.prefetch=0",                         # int (0 = AUTOTUNE)
     "data.augment=true",                       # bool
     "data.aug_rotation=0.04",                  # float (fraksi 2pi)
     "data.aug_width_shift=0.10",               # float
@@ -193,7 +195,7 @@ OVERRIDES = [
     "train.steps_per_epoch=0",                 # int, 0 = otomatis
     "train.validation_steps=0",                # int, 0 = otomatis
 
-    # ---- runtime (10) -----------------------------------------------------
+    # ---- runtime (11) -----------------------------------------------------
     "runtime.device=auto",                     # cpu | gpu | auto
     "runtime.run_name=",                       # str, kosong = timestamp otomatis
     "runtime.runs_dir=runs",                   # str
@@ -202,10 +204,11 @@ OVERRIDES = [
     "runtime.log_csv=true",                    # bool
     "runtime.tensorboard=false",               # bool
     "runtime.resume_from=",                    # str, path .keras untuk lanjut training
-    "runtime.num_parallel_calls=4",            # int
+    "runtime.num_parallel_calls=4",            # int (0 = AUTOTUNE)
     "runtime.deterministic=false",             # bool
+    "runtime.strategy=auto",                   # auto | none | mirrored
 
-    # ---- eval (8) ---------------------------------------------------------
+    # ---- eval (14) --------------------------------------------------------
     "eval.eval_batch_size=32",                 # int
     "eval.top_k=3",                            # int
     "eval.confusion_matrix=true",              # bool
@@ -214,6 +217,12 @@ OVERRIDES = [
     "eval.sample_predictions=16",              # int
     "eval.save_plots=true",                    # bool
     "eval.eval_split=test",                    # val | test | train
+    "eval.error_analysis=true",                # bool
+    "eval.misclassified_samples=16",           # int
+    "eval.top_confused_pairs=20",              # int
+    "eval.gradcam=true",                       # bool
+    "eval.gradcam_samples=8",                  # int
+    "eval.gradcam_alpha=0.4",                  # float
 ]
 
 cfg = C.from_yaml(str(ROOT / "configs" / "default.yaml"))
@@ -471,7 +480,7 @@ TRAINED = bool(MODEL_PATH) or bool(globals().get("RUN_TRAINING"))
 
 eval_model = None
 if MODEL_PATH:
-    eval_model = keras.models.load_model(MODEL_PATH)
+    eval_model = keras.models.load_model(MODEL_PATH, compile=False)
     print("Model dimuat dari", MODEL_PATH)
 elif TRAINED and "model" in dir():
     eval_model = model
@@ -531,30 +540,20 @@ else:
 """))
 
 # ---------------------------------------------------------------- 10. inference
-cells.append(md("""## 10. Inferensi satu gambar
+cells.append(md("""## 10. Inferensi satu gambar + Grad-CAM
 
-Uji model pada satu file citra di luar split — berguna untuk demo saat presentasi.
+Uji model pada satu file citra sekaligus memvisualisasikan peta aktivasi Grad-CAM
+untuk melihat area daun yang mendorong prediksi model.
 """))
 
 cells.append(code("""def predict_image(path, top_k=3):
-    \"\"\"Prediksi satu file citra memakai pipeline yang SAMA dengan training.\"\"\"
-    from PIL import Image
-    from src.data import _make_normalizer   # normalisasi per-arsitektur (imagenet/caffe/div255)
+    \"\"\"Prediksi + Grad-CAM untuk satu citra memakai src.gradcam.\"\"\"
+    from src.gradcam import explain_image
 
-    h, w = cfg["data"]["img_height"], cfg["data"]["img_width"]
-    with Image.open(path) as im:
-        im = im.convert("RGB").resize((w, h))
-        arr = np.asarray(im, dtype=np.float32) / 255.0
-
-    if cfg["data"]["channels"] == 1:
-        arr = arr.mean(axis=2, keepdims=True)
-
-    normalize = _make_normalizer(cfg["data"], cfg["model"]["arch"])
-    arr = np.asarray(normalize(arr[None, ...]), dtype=np.float32)
-
-    probs = eval_model.predict(arr, verbose=0)[0]
-    order = np.argsort(probs)[::-1][:top_k]
-    return [(class_names[i], float(probs[i])) for i in order]
+    return explain_image(
+        eval_model, path, cfg, class_names,
+        top_k=top_k, alpha=cfg["eval"]["gradcam_alpha"],
+    )
 
 
 SAMPLE = ""   # kosong = ambil otomatis satu citra dari split test
@@ -566,13 +565,21 @@ else:
         SAMPLE = bundle["test"]["paths"][0]
         print("Demo otomatis memakai citra test:", SAMPLE)
 
-    with Image.open(SAMPLE) as im:
-        plt.figure(figsize=(4, 4)); plt.imshow(im.convert("RGB")); plt.axis("off"); plt.show()
+    result = predict_image(SAMPLE, top_k=cfg["eval"]["top_k"])
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    axes[0].imshow(result["original_rgb"])
+    axes[0].set_title("Citra Asli")
+    axes[0].axis("off")
+    axes[1].imshow(result["overlay_rgb"])
+    axes[1].set_title("Grad-CAM: %s (%.2f)" % (result["pred_class"], result["pred_prob"]))
+    axes[1].axis("off")
+    plt.tight_layout()
+    plt.show()
 
     print("")
-    print("Prediksi top-3:")
-    for cls, prob in predict_image(SAMPLE):
-        print("  %-46s %.4f" % (cls, prob))
+    print("Prediksi top-%d:" % len(result["top_k"]))
+    for item in result["top_k"]:
+        print("  %-46s %.4f" % (item["class"], item["prob"]))
     print("")
     if TRAINED:
         print("Model sudah dilatih - prediksi di atas berasal dari bobot hasil training.")
