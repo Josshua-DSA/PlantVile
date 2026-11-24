@@ -49,6 +49,12 @@ Notebook ini menjalankan seluruh alur eksperimen **PlantVile** di Kaggle secara 
 2. **Internet:** **`ON`** (diperlukan untuk `git clone` dari GitHub dan mengunduh bobot pretrained ImageNet).
 3. **Add Input:** Tambahkan dataset PlantVillage (`emmarex/plantdisease`) sehingga ter-mount di `/kaggle/input/datasets/emmarex/plantdisease/PlantVillage`.
 
+### Hipotesis Eksperimen (2-Stage Fine-Tuning, `224×224`, Anti-Leakage)
+- **H1:** *2-stage fine-tuning* (`m2_mobilenetv2_ft`, `fine_tune_at=107`, `adamw`, `lr=1e-4` dari `m1/best.keras`) mengungguli *frozen head* (`m1`) pada `val f1_macro` & mengurangi kekeliruan antar-penyakit Tomat.
+- **H2:** Komparasi kontrol `MobileNetV2` (`m2`) vs `EfficientNetB0` (`m3b`) vs `ResNet50` (`m4b`) mengukur *trade-off* antara `val f1_macro` dengan ukuran model `.keras` untuk UI.
+- **H3:** `m5_focal_check` (`focal` + `class_weight=none`) vs pemenang `categorical_crossentropy + label_smoothing=0.05 + class_weight=balanced` menguji penanganan imbalance **21,1×** (`Potato___healthy`) & kalibrasi **ECE**.
+- **H4:** Augmentasi fotometris + geometris menjaga fokus **Grad-CAM** pada bercak daun (bukan latar studio), dan uji 3 seed (`42, 123, 2024`) memverifikasi stabilitas sebelum 1× uji `test`.
+
 ### Peta Input & Output per Tahap
 
 | Cell | Tahap | Input Utama | Output Ditampilkan | Disimpan ke `/kaggle/working/` |
@@ -247,61 +253,170 @@ if RUN_PILOT:
 
     # ---------------------------------------------------------------- Cell 5
     cells.append(md("""
-## Cell 5 — Registry Matriks Eksperimen (`EXP_REGISTRY`)
+## Cell 5 — Registry Matriks Eksperimen (`EXP_REGISTRY`, 11-Dimensi & 2-Stage)
 
-- **Input:** Daftar `SELECTED_RUNS`, `RUN_EXPERIMENTS = False`, `SKIP_IF_DONE = True`, dan `STRATEGY_MODE = "auto"` (`auto` = `MirroredStrategy` di T4×2; `none` = 1 GPU).
-- **Output Layar:** Tabel daftar eksperimen yang dipilih, variabel bebas yang diubah, status (`DONE` / `PENDING`), dan pratinjau perintah CLI.
+- **Input:** `WINNER_ARCH` (isi setelah membandingkan `m2`/`m3b`/`m4b` di Cell 7), `SELECTED_RUNS`, `RUN_EXPERIMENTS = False`, `SKIP_IF_DONE = True`, dan `STRATEGY_MODE = "auto"`.
+- **Output Layar:** Tabel daftar eksperimen yang dipilih, parent *warm-start* (`resume_from_run`), variabel yang diuji, dan status (`DONE` / `PENDING`).
 - **Disimpan ke Output Kaggle:** Tidak ada.
 """))
 
-    cells.append(code("""EXP_REGISTRY = {
-    "exp00a_simple_cnn": {
-        "desc": "Scratch CNN baseline (no augment)",
-        "overrides": ["model.arch=simple_cnn", "data.augment=false", "data.normalize=div255"],
-    },
-    "exp00b_mobilenet_ctrl": {
-        "desc": "Transfer baseline MobileNetV2 (no augment)",
-        "overrides": ["model.arch=mobilenetv2", "data.augment=false"],
-    },
-    "exp01_aug": {
-        "desc": "Track A: + Data augmentation",
-        "overrides": ["model.arch=mobilenetv2", "data.augment=true"],
-    },
-    "exp02a_noweight": {
-        "desc": "Track B1: class_weight=none",
-        "overrides": ["model.arch=mobilenetv2", "data.augment=true", "train.class_weight=none"],
-    },
-    "exp02b_focal": {
-        "desc": "Track B2: loss=focal + class_weight=none",
-        "overrides": ["model.arch=mobilenetv2", "data.augment=true", "train.class_weight=none", "train.loss=focal"],
-    },
-    "exp03_res224": {
-        "desc": "Track C: Resolusi input 224x224",
-        "overrides": ["model.arch=mobilenetv2", "data.img_height=224", "data.img_width=224"],
-    },
-    "exp04a_resnet50": {
-        "desc": "Track D1: Backbone ResNet50 (224x224)",
-        "overrides": ["model.arch=resnet50", "data.img_height=224", "data.img_width=224"],
-    },
-    "exp04b_effnetb0": {
-        "desc": "Track D2: Backbone EfficientNetB0 (224x224)",
-        "overrides": ["model.arch=efficientnetb0", "data.img_height=224", "data.img_width=224"],
-    },
-    "exp05_finetune": {
-        "desc": "Track E: Fine-tune MobileNetV2 (>=100) + AdamW",
+    cells.append(code("""COMMON_OVERRIDES = [
+    "data.img_height=224",
+    "data.img_width=224",
+    "data.channels=3",
+    "data.rescale=true",
+    "data.normalize=imagenet",
+    "data.deduplicate=true",
+    "data.group_same_leaf=true",
+    "data.shuffle_seed=42",
+    "data.augment=true",
+    "data.aug_hflip=true",
+    "data.aug_vflip=true",
+    "data.aug_rotation=0.08",
+    "data.aug_width_shift=0.10",
+    "data.aug_height_shift=0.10",
+    "data.aug_zoom=0.12",
+    "data.aug_shear=0.0",
+    "data.aug_brightness=0.20",
+    "data.aug_contrast=0.20",
+    "data.aug_fill_mode=reflect",
+    "model.dense_units=256",
+    "model.dropout=0.3",
+    "model.batch_norm=true",
+    "model.l2_weight_decay=0.0001",
+    "train.early_stopping=true",
+    "train.es_monitor=val_loss",
+    "train.es_patience=6",
+    "train.es_restore_best=true",
+    "train.reduce_lr=true",
+    "train.lr_monitor=val_loss",
+    "train.lr_factor=0.5",
+    "train.lr_patience=3",
+    "train.lr_min_lr=1e-06",
+]
+
+# Batas awal blok residual atas (terverifikasi pada Keras 3.15.1)
+ARCH_FINE_TUNE_AT = {
+    "mobilenetv2": 107,      # block_12_expand (154 layers)
+    "efficientnetb0": 162,   # block6a_expand_conv (237 layers)
+    "resnet50": 143,         # conv5_block1_1_conv (175 layers)
+}
+ARCH_HEAD_RUN = {
+    "mobilenetv2": "m1_mobilenetv2_head",
+    "efficientnetb0": "m3a_effnetb0_head",
+    "resnet50": "m4a_resnet50_head",
+}
+
+# Ubah WINNER_ARCH setelah membandingkan m2, m3b, dan m4b di Cell 7 (sebelum menjalankan m5/m6)
+WINNER_ARCH = "mobilenetv2"
+
+EXP_REGISTRY = {
+    "m1_mobilenetv2_head": {
+        "desc": "Stage 1: MobileNetV2 frozen head warmup (10 ep, lr=1e-3)",
         "overrides": [
-            "model.arch=mobilenetv2", "data.img_height=224", "data.img_width=224",
-            "model.freeze_base=true", "model.fine_tune_at=100",
-            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=30",
+            "model.arch=mobilenetv2", "model.freeze_base=true", "model.fine_tune_at=0",
+            "train.optimizer=adam", "train.learning_rate=0.001", "train.epochs=10",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
         ],
     },
-    "exp06_seed123": {
-        "desc": "Track F: Multi-seed stability (seed=123)",
-        "overrides": ["model.arch=mobilenetv2", "data.img_height=224", "data.img_width=224", "runtime.seed=123"],
+    "m2_mobilenetv2_ft": {
+        "desc": "Stage 2 (H1): MobileNetV2 fine-tune >=107 + AdamW",
+        "resume_from_run": "m1_mobilenetv2_head",
+        "overrides": [
+            "model.arch=mobilenetv2", "model.freeze_base=true", "model.fine_tune_at=107",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
+        ],
     },
-    "exp06_seed2024": {
-        "desc": "Track F: Multi-seed stability (seed=2024)",
-        "overrides": ["model.arch=mobilenetv2", "data.img_height=224", "data.img_width=224", "runtime.seed=2024"],
+    "m3a_effnetb0_head": {
+        "desc": "Stage 1: EfficientNetB0 frozen head warmup (10 ep, lr=1e-3)",
+        "overrides": [
+            "model.arch=efficientnetb0", "model.freeze_base=true", "model.fine_tune_at=0",
+            "train.optimizer=adam", "train.learning_rate=0.001", "train.epochs=10",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
+        ],
+    },
+    "m3b_effnetb0_ft": {
+        "desc": "Stage 2 (H2): EfficientNetB0 fine-tune >=162 + AdamW",
+        "resume_from_run": "m3a_effnetb0_head",
+        "overrides": [
+            "model.arch=efficientnetb0", "model.freeze_base=true", "model.fine_tune_at=162",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
+        ],
+    },
+    "m4a_resnet50_head": {
+        "desc": "Stage 1: ResNet50 frozen head warmup (10 ep, lr=1e-3)",
+        "overrides": [
+            "model.arch=resnet50", "model.freeze_base=true", "model.fine_tune_at=0",
+            "train.optimizer=adam", "train.learning_rate=0.001", "train.epochs=10",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
+        ],
+    },
+    "m4b_resnet50_ft": {
+        "desc": "Stage 2 (H2): ResNet50 fine-tune >=143 + AdamW",
+        "resume_from_run": "m4a_resnet50_head",
+        "overrides": [
+            "model.arch=resnet50", "model.freeze_base=true", "model.fine_tune_at=143",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced",
+        ],
+    },
+    "m5_focal_check": {
+        "desc": f"Stage 2 (H3): {WINNER_ARCH} focal loss + class_weight=none",
+        "resume_from_run": ARCH_HEAD_RUN[WINNER_ARCH],
+        "overrides": [
+            f"model.arch={WINNER_ARCH}", "model.freeze_base=true",
+            f"model.fine_tune_at={ARCH_FINE_TUNE_AT[WINNER_ARCH]}",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=focal", "train.label_smoothing=0.0", "train.class_weight=none",
+        ],
+    },
+    "m6_seed123_head": {
+        "desc": f"Stage 1 (H4): {WINNER_ARCH} multi-seed warmup (seed=123)",
+        "overrides": [
+            f"model.arch={WINNER_ARCH}", "model.freeze_base=true", "model.fine_tune_at=0",
+            "train.optimizer=adam", "train.learning_rate=0.001", "train.epochs=10",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced", "runtime.seed=123",
+        ],
+    },
+    "m6_seed123_ft": {
+        "desc": f"Stage 2 (H4): {WINNER_ARCH} multi-seed fine-tune (seed=123)",
+        "resume_from_run": "m6_seed123_head",
+        "overrides": [
+            f"model.arch={WINNER_ARCH}", "model.freeze_base=true",
+            f"model.fine_tune_at={ARCH_FINE_TUNE_AT[WINNER_ARCH]}",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced", "runtime.seed=123",
+        ],
+    },
+    "m6_seed2024_head": {
+        "desc": f"Stage 1 (H4): {WINNER_ARCH} multi-seed warmup (seed=2024)",
+        "overrides": [
+            f"model.arch={WINNER_ARCH}", "model.freeze_base=true", "model.fine_tune_at=0",
+            "train.optimizer=adam", "train.learning_rate=0.001", "train.epochs=10",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced", "runtime.seed=2024",
+        ],
+    },
+    "m6_seed2024_ft": {
+        "desc": f"Stage 2 (H4): {WINNER_ARCH} multi-seed fine-tune (seed=2024)",
+        "resume_from_run": "m6_seed2024_head",
+        "overrides": [
+            f"model.arch={WINNER_ARCH}", "model.freeze_base=true",
+            f"model.fine_tune_at={ARCH_FINE_TUNE_AT[WINNER_ARCH]}",
+            "train.optimizer=adamw", "train.learning_rate=0.0001", "train.epochs=25",
+            "train.loss=categorical_crossentropy", "train.label_smoothing=0.05",
+            "train.class_weight=balanced", "runtime.seed=2024",
+        ],
     },
 }
 
@@ -309,14 +424,19 @@ if RUN_PILOT:
 RUN_EXPERIMENTS = False  # <-- Ubah ke True untuk menjalankan training
 SKIP_IF_DONE = True      # <-- Lewati run yang sudah punya val_metrics.json
 STRATEGY_MODE = "auto"   # "auto" (MirroredStrategy T4x2) | "none" (1 GPU)
+
+# Batch 1 (default): MobileNetV2 & EfficientNetB0 2-Stage Fine-Tuning
+# Batch 2: ["m4a_resnet50_head", "m4b_resnet50_ft"]
+# Batch 3 (setelah set WINNER_ARCH): ["m5_focal_check", "m6_seed123_head", "m6_seed123_ft", "m6_seed2024_head", "m6_seed2024_ft"]
 SELECTED_RUNS = [
-    "exp00a_simple_cnn",
-    "exp00b_mobilenet_ctrl",
-    "exp01_aug",
+    "m1_mobilenetv2_head",
+    "m2_mobilenetv2_ft",
+    "m3a_effnetb0_head",
+    "m3b_effnetb0_ft",
 ]
 
 
-def build_run_command(run_id: str) -> list[str]:
+def build_run_command(run_id: str, check_resume: bool = False) -> list[str]:
     spec = EXP_REGISTRY[run_id]
     cmd = [
         sys.executable, "main.py", "--yes",
@@ -330,7 +450,15 @@ def build_run_command(run_id: str) -> list[str]:
     ]
     if not HAS_GPU:
         cmd += ["--set", "runtime.device=cpu"]
-    for ov in spec["overrides"]:
+    parent_run = spec.get("resume_from_run")
+    if parent_run:
+        parent_ckpt = RUNS_DIR / parent_run / "best.keras"
+        if check_resume:
+            assert parent_ckpt.is_file(), (
+                f"Warm-start checkpoint belum ada: {parent_ckpt}. Jalankan '{parent_run}' lebih dulu."
+            )
+        cmd += ["--set", f"runtime.resume_from={parent_ckpt}"]
+    for ov in COMMON_OVERRIDES + spec["overrides"]:
         cmd += ["--set", ov]
     return cmd
 
@@ -342,12 +470,13 @@ for rid in SELECTED_RUNS:
     preview_rows.append({
         "run_id": rid,
         "status": "DONE" if done else "PENDING",
+        "warm_start": EXP_REGISTRY[rid].get("resume_from_run", "-"),
         "description": EXP_REGISTRY[rid]["desc"],
-        "overrides": ", ".join(EXP_REGISTRY[rid]["overrides"]),
+        "specific_overrides": ", ".join(EXP_REGISTRY[rid]["overrides"]),
     })
 
 display(pd.DataFrame(preview_rows))
-print("RUN_EXPERIMENTS =", RUN_EXPERIMENTS)
+print("RUN_EXPERIMENTS =", RUN_EXPERIMENTS, "| WINNER_ARCH =", WINNER_ARCH)
 """))
 
     # ---------------------------------------------------------------- Cell 6
@@ -370,7 +499,7 @@ else:
         if SKIP_IF_DONE and done_marker.is_file():
             print(f"[SKIP] {rid} sudah memiliki {done_marker}")
             continue
-        cmd = build_run_command(rid)
+        cmd = build_run_command(rid, check_resume=True)
         print(f"\\n{'=' * 72}\\n[RUN] {rid} — {EXP_REGISTRY[rid]['desc']}\\n{'=' * 72}")
         t0 = time.time()
         run_stream(cmd)
@@ -427,10 +556,19 @@ else:
     df_board.to_csv(RUNS_DIR / "experiment_leaderboard.csv", index=False)
     display(df_board)
 
-    ms_rows = df_board[df_board["run_id"].str.startswith("exp06_")]
+    winner_ft_map = {
+        "mobilenetv2": "m2_mobilenetv2_ft",
+        "efficientnetb0": "m3b_effnetb0_ft",
+        "resnet50": "m4b_resnet50_ft",
+    }
+    seed42_run = winner_ft_map.get(globals().get("WINNER_ARCH", ""), "")
+    ms_mask = df_board["run_id"].str.contains(r"^m6_seed\d+_ft$", regex=True) | (
+        df_board["run_id"] == seed42_run
+    )
+    ms_rows = df_board[ms_mask]
     if len(ms_rows) >= 2:
         print(
-            f"\\nMulti-Seed Summary ({len(ms_rows)} runs): "
+            f"\\nMulti-Seed Summary ({len(ms_rows)} runs: {list(ms_rows['run_id'])}): "
             f"f1_macro = {ms_rows['f1_macro'].mean():.4f} ± {ms_rows['f1_macro'].std(ddof=1):.4f} | "
             f"accuracy = {ms_rows['accuracy'].mean():.4f} ± {ms_rows['accuracy'].std(ddof=1):.4f}"
         )

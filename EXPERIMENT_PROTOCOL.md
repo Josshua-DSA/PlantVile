@@ -1,255 +1,88 @@
-# Experiment Protocol — PlantVile (PlantVillage CNN)
+# Experiment Protocol — PlantVile (11-Dimension CV Landscape)
 
-Dokumen ini adalah protokol eksperimen tertulis untuk proyek **PlantVile** yang menghubungkan prinsip *Fondasi Eksperimen Deep Learning* dengan implementasi nyata di `main.py`, `configs/default.yaml`, dan modul `src/`.
+Dokumen ini adalah protokol eksperimen tertulis untuk proyek **PlantVile** yang menggabungkan temuan audit/EDA dataset lokal ([docs/DATA_AUDIT_AND_EDA.md](docs/DATA_AUDIT_AND_EDA.md)), literatur riset PlantVillage, dan arsitektur kode (`main.py`, `configs/kaggle_t4x2.yaml`, `src/`).
 
-> **Aturan Utama:** Seluruh keputusan desain, pemilihan arsitektur, dan tuning hyperparameter **wajib** dievaluasi pada split **`val`** (`--set eval.eval_split=val`). Split **`test`** dibekukan hingga tahap akhir (*Final Evaluation*) dan hanya dibuka **satu kali** untuk kandidat model final.
-
----
-
-## 1. Problem Formulation & Batasan Sistem
-
-### 1.1 Formulasi Masalah ML
-| Komponen | Definisi |
-| :--- | :--- |
-| **Masalah Nyata** | Klasifikasi otomatis penyakit daun tanaman dari citra untuk aplikasi/UI tugas akhir Neuro Computing |
-| **Formulasi Formal** | $f_\theta: X \rightarrow Y$, memetakan citra daun RGB $X \in \mathbb{R}^{H \times W \times 3}$ ke label kategori penyakit $Y \in \{0, \dots, C-1\}$ |
-| **Tipe Task** | *Supervised Multi-Class Image Classification* |
-| **Skala Kelas** | Dinamis berdasarkan folder (`scan_dataset()` di `src/data.py`): 15 kelas atau 38 kelas PlantVillage |
-| **Representasi Target** | *One-hot vector* untuk `categorical_crossentropy` / `focal` (default), atau integer untuk `sparse_categorical_crossentropy` |
-
-### 1.2 Constraints Operasional
-1. **Workflow Terpisah (Lokal vs Kaggle):** Pengembangan kode dan uji alur (`--check` dengan dataset dummy) dilakukan di lokal CPU; pelatihan penuh dijalankan di GPU Kaggle (`/kaggle/input/...` → `/kaggle/working/runs`).
-2. **Ketimpangan Kelas (*Class Imbalance*):** Pada snapshot 15 kelas di `README.md`, rasio kelas terbesar/terkecil mencapai **21x** (`3.208` vs `152` gambar pada `Potato___healthy`).
-3. **Risiko *Distribution Shift*:** Dataset PlantVillage mayoritas diambil pada latar seragam/terkontrol. Performa tinggi pada split `val`/`test` PlantVillage **tidak otomatis** menjamin performa yang sama pada foto daun berlatar kompleks dari kamera pengguna di aplikasi/UI.
-4. **Batasan Aplikasi/UI Target:** Model terpilih harus mudah dimuat untuk inferensi lokal (asumsi target utama: Web App Python lokal seperti Streamlit/Gradio atau REST API; opsi Mobile TFLite bila diperlukan), sehingga ukuran file `.keras`, kecepatan inferensi CPU, dan konsistensi *preprocessing* menjadi syarat kelayakan.
+> **Aturan Utama:** Seluruh seleksi arsitektur, *fine-tuning*, dan perbandingan loss **wajib** dievaluasi pada split **`val`** (`--set eval.eval_split=val`). Split **`test`** dibekukan hingga akhir dan hanya dievaluasi **1 kali** pada model pemenang final.
 
 ---
 
-## 2. Protokol Audit Dataset Kaggle (Pra-Training)
+## 1. Landasan Bukti Data & Literatur
 
-Sebelum menjalankan eksperimen training di Kaggle, jalankan audit dataset satu kali pada `/kaggle/input/<dataset-path>` (misal lewat sel Python di Kaggle Notebook atau bagian EDA di `notebook/plantvillage_cnn.ipynb`):
+### 1.1 Fakta Dataset Lokal (`[Fakta Terverifikasi]`)
+- **Skala & Komposisi:** 15 kelas (3 spesies: Tomato `77,6%`, Pepper `12,0%`, Potato `10,4%`), `20.638` citra valid resolusi asli seragam `256×256` (`RGB` + 1 `RGBA`), menjadi **`20.624` citra** setelah deduplikasi MD5 (`14` duplikat *within-class* dibuang *in-memory*).
+- **Ketimpangan Kelas:** Rasio *max/min* mencapai **21,1×** (`3.208` pada `Tomato__Tomato_YellowLeaf__Curl_Virus` vs `152` pada `Potato___healthy`, yang hanya memiliki ~23 sampel di `val`/`test`).
+- **Kualitas Split & Kebocoran:** Dengan `data.deduplicate=true` dan `data.group_same_leaf=true` (`seed=42`), seluruh `101` grup foto daun fisik yang sama (`Leaf X.Y`, total `290` file) dijaga tetap utuh per split (`14.434` train / `3.095` val / `3.095` test; `OVERLAPS: 0 0 0`).
+- **Risiko Latar Studio:** Analisis tepi 16 px menunjukkan variasi kecerahan antar-kelas (`BrdLum` `0,477`–`0,604`; `BrdStd < 0,10` di beberapa kelas Tomat).
 
-### Checklist Audit Wajib
-1. **Verifikasi Struktur & Jumlah Kelas:**
-   - Pastikan `resolve_variant_dir()` di `src/data.py` mengarah ke folder kelas yang benar (`flat` `<root>/<Class>/` atau `bertingkat` `<root>/color/<Class>/`), terutama jika dataset Kaggle memuat keduanya.
-   - Catat jumlah kelas aktual ($C$) dan total gambar valid (`IMG_EXTS`: `.jpg`, `.jpeg`, `.png`, `.bmp`).
-2. **Audit Distribusi Kelas & Rasio Imbalance:**
-   - Hitung jumlah file per kelas, nilai minimum, maksimum, median, dan rasio $\text{max}/\text{min}$.
-   - Identifikasi kelas minoritas (contoh: `Potato___healthy` = 152 gambar → pada split 70/15/15 hanya menghasilkan ~23 gambar `val` dan ~23 gambar `test`).
-3. **Audit Integritas Fisik Citra:**
-   - Periksa apakah ada file 0-byte, non-citra (seperti `svn-r6Yb5c`), atau citra korup yang gagal dibuka oleh `PIL.Image.open()`.
-   - Verifikasi mode warna (`RGB` vs `RGBA`/`L`) dan variasi resolusi asli gambar (umumnya `256x256` pada PlantVillage).
-4. **Audit Duplikasi Citra (*Anti-Leakage*):**
-   - Hitung hash file (misal `hashlib.md5`) untuk mendeteksi gambar identik di dalam satu kelas atau lintas kelas.
-   - Jika ditemukan duplikat persis antar-sampel, catat jumlahnya karena duplikat yang terpecah ke `train` dan `val`/`test` menyebabkan *data leakage* dan metrik terlalu optimistis.
-5. **Inspeksi Visual & Bias Sampling:**
-   - Tampilkan sampel acak per kelas untuk memeriksa *label noise*, artefak latar belakang seragam, atau orientasi gambar (dasar pemilihan parameter augmentasi).
-
-### Audit Dataset Otomatis via CLI (Lokal & Kaggle)
-Selain inspeksi manual di `notebook/data_audit_eda.ipynb`, gunakan skrip ringan *read-only* berikut sebelum training:
-```bash
-python scripts/audit_dataset.py --root $DATA_ROOT --out $RUNS_DIR/dataset_audit.json
-```
-*(Sebelum `git push` dari lokal ke GitHub, jalankan `python scripts/smoke_test.py` dan `pytest tests/test_error_analysis.py -v` untuk memverifikasi seluruh alur pipeline di CPU).*
+### 1.2 Temuan Literatur PlantVillage
+- **2-Stage Transfer Learning (*Too et al., 2019*; benchmark ImageNet CNN):** Pelatihan dua tahap (*frozen head warmup* → *partial unfreezing* pada resolusi `224×224` dengan penurunan *learning rate*) lebih stabil daripada membuka backbone dari epoch 1, dengan `MobileNetV2`, `EfficientNetB0`, dan `ResNet50` lazim bersaing pada rentang Macro F1 `0,96–0,99` (tergantung protokol split).
+- **Bias Latar Belakang (*Mohanty et al., 2016*; *Noyan, 2022*; *Toda & Okura*):** *Noyan (2022)* menunjukkan model yang hanya melihat **8 piksel latar belakang** PlantVillage mencapai **49,0% accuracy** (vs 2,6% tebakan acak). Oleh karena itu, **augmentasi fotometris + geometris** serta **audit visual Grad-CAM** wajib masuk dalam protokol untuk memverifikasi model fokus pada gejala daun, bukan latar studio.
 
 ---
 
-## 3. Validation Design & Aturan `eval.eval_split=val` vs `test`
+## 2. Rumusan Masalah & Hipotesis Eksperimen (H1–H4)
 
-### 3.1 Protokol Pemisahan Data
-Codebase membagi data per kelas (`data.split_strategy=stratified`) di `src/data.py:79-112` dengan proporsi default:
-- **Training (`70%`):** Pembaruan parameter model dan perhitungan `class_weight`.
-- **Validation (`15%`, `data.val_split=0.15`):** *Early stopping*, *learning rate scheduling*, seleksi arsitektur, dan seluruh perbandingan eksperimen.
-- **Test (`15%`, `data.test_split=0.15`):** Estimasi performa generalisasi akhir **satu kali** setelah seluruh keputusan eksperimen dibekukan.
+- **Masalah:** Klasifikasi supervised multi-kelas $f_\theta: X \rightarrow Y$ memetakan citra daun $X \in \mathbb{R}^{224 \times 224 \times 3}$ ke 15 kelas penyakit tanaman untuk aplikasi/UI lokal.
 
-> **Invariansi Split:** Pastikan `data.shuffle_seed=42`, `data.val_split=0.15`, `data.test_split=0.15`, `data.split_strategy=stratified`, dan `data.max_per_class=0` tetap **identik** di seluruh eksperimen utama agar setiap model dibandingkan pada partisi data yang persis sama.
-
-### 3.2 Aturan Ketat Isolasi `test` Set
-`configs/default.yaml` secara bawaan menyetel `eval.eval_split: test`. Untuk mencegah *test-set leakage* selama eksplorasi:
-1. **Selama Eksperimen (`exp00` s.d. `exp06`):** **Wajib** selalu menyertakan `--set eval.eval_split=val`. Hasil di folder run akan tertulis sebagai `val_metrics.json`, `val_confusion_matrix.png`, dll.
-2. **Tahap Final (Sekali Saja):** Setelah satu konfigurasi kandidat terbaik diputuskan berdasarkan `val_metrics.json` dan analisis error, jalankan evaluasi akhir pada `test` set menggunakan snapshot `config_used.yaml` dari run tersebut:
-   ```bash
-   python main.py --eval /kaggle/working/runs/<final_run>/best.keras \
-     --config /kaggle/working/runs/<final_run>/config_used.yaml \
-     --set eval.eval_split=test
-   ```
-3. **Diagnosis Overfitting/Underfitting (Opsional):** Jika perlu mengecek performa di data latih secara terpisah, gunakan `--set eval.eval_split=train` dengan `--eval`.
-
-### 3.3 Pengujian Multi-Seed (Kandidat Final)
-Satu kali *run* memiliki variasi stokastik (inisialisasi classifier head, pengacakan batch, augmentasi, dan non-determinisme GPU). Untuk konfigurasi terbaik yang lolos seleksi Track A–E:
-- Jalankan ulang dengan minimal **3 seed**: `runtime.seed=42`, `123`, dan `2024` (tetap dievaluasi pada `eval.eval_split=val`, dengan `data.shuffle_seed=42` dijaga tetap agar split tidak berubah).
-- Laporkan performa sebagai **Mean ± Standard Deviation** untuk `f1_macro` dan `accuracy`.
+| ID | `[Hipotesis]` | Desain Pengujian Terkontrol | Kriteria Evaluasi & Bukti |
+| :--- | :--- | :--- | :--- |
+| **H1** | **2-Stage Fine-Tuning vs Frozen Base:** Membuka blok residual atas (`fine_tune_at=107` pada `MobileNetV2` setelah *head warmup* `m1`, dengan `adamw`, `lr=1e-4`) akan meningkatkan `val f1_macro` dan mengurangi kekeliruan antar-penyakit Tomat dibanding *frozen head* (`m1`) | Bandingkan `m1_mobilenetv2_head` (frozen) vs `m2_mobilenetv2_ft` (*warm-start* dari `m1/best.keras`) | `val f1_macro`, daftar `val_confused_pairs.csv`, & audit Grad-CAM |
+| **H2** | **Perbandingan 3 Keluarga Arsitektur & Trade-off UI:** Pada kondisi kontrol identik (`224×224`, 2-stage fine-tuning, augmentasi & regularisasi sama), `EfficientNetB0` (`m3b`) dan `ResNet50` (`m4b`) akan bersaing tipis dengan `MobileNetV2` (`m2`); jika selisih `val f1_macro` `< 0,01`, model ringan memberikan *trade-off* ukuran & latensi UI lebih baik | Bandingkan `m2_mobilenetv2_ft`, `m3b_effnetb0_ft`, dan `m4b_resnet50_ft` | `val f1_macro`, *worst-class recall*, ukuran `best.keras` (MB) |
+| **H3** | **Penanganan Imbalance 21,1× & Kalibrasi ECE:** Pada arsitektur pemenang, `focal` loss + `class_weight=none` (`m5_focal_check`) berpotensi menghasilkan kalibrasi probabilitas (**ECE**) atau keseimbangan precision-recall kelas minoritas berbeda dibanding `categorical_crossentropy + label_smoothing=0.05 + class_weight=balanced` (`BalWt=9,08`) | Bandingkan `m5_focal_check` vs run pemenang `categorical_crossentropy + balanced + label_smoothing=0.05` | `val f1_macro`, recall & precision `Potato___healthy`, & **ECE (10 bins)** |
+| **H4** | **Validitas Visual & Stabilitas Multi-Seed:** Augmentasi geometris + fotometris (`aug_vflip=true`, `aug_rotation=0.08`, `aug_brightness/contrast=0.20`) akan mengarahkan fokus **Grad-CAM** ke bercak daun, dan pengulangan 3 seed (`42, 123, 2024`) pada kandidat terbaik (`m6`) akan menghasilkan variasi (`SD`) kecil sebelum 1× uji `test` | Audit `val_gradcam_grid.png` + jalankan `m6_seed123_*` dan `m6_seed2024_*` pada arsitektur pemenang | Fokus daun pada Grad-CAM & `Mean ± SD` lintas 3 seed |
 
 ---
 
-## 4. Baseline & Matriks Eksperimen Terkontrol untuk Kaggle
+## 3. CV Experiment Configuration Landscape (11 Dimensi)
 
-Semua perintah di bawah mengasumsikan direktori kerja di root repo (`PlantVile/`) di Kaggle Notebook dengan dataset di `$DATA_ROOT` dan output di `/kaggle/working/runs`. Gunakan flag `--yes` agar `main.py` melewati konfirmasi interaktif `[y/N]` secara aman di sel Kaggle.
-
-Set variabel shell di Kaggle terlebih dahulu:
-```bash
-export DATA_ROOT=/kaggle/input/datasets/emmarex/plantdisease/PlantVillage
-export RUNS_DIR=/kaggle/working/runs
-```
-
-> **Notebook Siap Pakai di Kaggle:** Seluruh alur di bawah (clone repo → audit → `--check` → matriks eksperimen → leaderboard → inspeksi Grad-CAM → final `test` → zip artefak) juga tersedia dalam bentuk notebook di [notebook/kaggle_experiment_runner.ipynb](notebook/kaggle_experiment_runner.ipynb) (di-generate lewat `scripts/build_kaggle_notebook.py`).
-
-### Optimasi Hardware Kaggle: T4×2 GPU vs Kaggle CPU
-- **Mode Kaggle GPU T4×2 (Disarankan untuk Eksperimen Penuh):** Gunakan preset `configs/kaggle_t4x2.yaml` yang mengaktifkan `mixed_precision=mixed_float16`, `cache=memory`, `prefetch=0` (`AUTOTUNE`), `num_parallel_calls=0` (`AUTOTUNE`), `batch_size=64`, dan `runtime.strategy=auto` (`MirroredStrategy` jika 2 GPU terlihat).
-  - *Alternatif Parallel Single-GPU:* Untuk eksperimen ringan (`mobilenetv2` / `128px`), Anda juga dapat menjalankan 2 eksperimen berbeda secara paralel per GPU dengan `CUDA_VISIBLE_DEVICES=0 ... --set runtime.strategy=none` dan `CUDA_VISIBLE_DEVICES=1 ... --set runtime.strategy=none`.
-- **Mode Kaggle CPU (4 vCPU, 30 GB RAM):** Gunakan `configs/default.yaml` dengan `runtime.device=cpu`, `train.mixed_precision=off`, `data.cache=memory`, `data.batch_size=32`, dan `runtime.num_parallel_calls=4`.
-
-### 4.0 Pilot Check (Smoke Test — Tanpa Hasil Ilmiah)
-Tujuan: Memastikan GPU terdeteksi, struktur folder terbaca, dan pipeline tidak error sebelum menjalankan training penuh.
-```bash
-# 1. Validasi config & pipeline tanpa training
-python main.py --check --config configs/default.yaml \
-  --set data.root=$DATA_ROOT \
-  --set runtime.device=gpu
-
-# 2. Mini training 2 epoch (subset 200 gambar/kelas) untuk cek kecepatan GPU & I/O
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT \
-  --set data.max_per_class=200 \
-  --set train.epochs=2 \
-  --set eval.eval_split=val \
-  --set runtime.device=gpu \
-  --set runtime.runs_dir=$RUNS_DIR \
-  --set runtime.run_name=pilot_smoke
-```
-
-### 4.1 Matriks Eksperimen Terkontrol (OFAT & Controlled Comparison)
-
-Setiap eksperimen hanya mengubah **1 faktor utama** terhadap kelompok kontrolnya (*controlled variables* dijaga konstan):
-
-| Run ID | Pertanyaan Riset & Hipotesis | Variabel Bebas (Diubah) | Kelompok Kontrol / Acuan | Variabel Terkontrol (Tetap) |
-| :--- | :--- | :--- | :--- | :--- |
-| **`exp00a_simple_cnn`** | **Scratch Baseline:** Berapa batas bawah performa CNN dari nol tanpa *transfer learning* dan tanpa augmentasi? | `model.arch=simple_cnn`, `data.augment=false`, `data.normalize=div255` | — | `128x128`, `adam`, `lr=1e-3`, `epochs=20`, `balanced`, `seed=42` |
-| **`exp00b_mobilenet_ctrl`** | **Transfer Control Baseline:** Seberapa besar kenaikan dari bobot ImageNet *frozen* (`MobileNetV2`) tanpa augmentasi? | `model.arch=mobilenetv2`, `data.augment=false`, `data.normalize=imagenet` | `exp00a_simple_cnn` | `128x128`, `freeze_base=true`, `adam`, `lr=1e-3`, `epochs=20`, `balanced` |
-| **`exp01_aug`** | **Track A (Augmentasi):** Apakah augmentasi default mengurangi *overfitting* (gap train–val) dan menaikkan `val f1_macro`? | `data.augment=true` | `exp00b_mobilenet_ctrl` | `mobilenetv2`, `128x128`, `balanced`, `adam`, `lr=1e-3`, `seed=42` |
-| **`exp02a_noweight`** | **Track B1 (Imbalance):** Apakah `class_weight=balanced` benar-benar membantu recall kelas minoritas dibanding tanpa pembobotan? | `train.class_weight=none` | `exp01_aug` | `mobilenetv2`, `128x128`, `augment=true`, `loss=categorical_crossentropy` |
-| **`exp02b_focal`** | **Track B2 (Imbalance):** Apakah `focal` loss lebih baik atau lebih stabil daripada `class_weight=balanced`? | `train.loss=focal`, `train.class_weight=none` | `exp01_aug` | `mobilenetv2`, `128x128`, `augment=true`, `seed=42` |
-| **`exp03_res224`** | **Track C (Resolusi):** Apakah menaikkan resolusi ke `224x224` membantu menangkap gejala bercak daun halus pada `val f1_macro`? | `data.img_height=224`, `data.img_width=224` | Pemenang Track A–B | Kebijakan augmentasi & loss pemenang Track A–B, `mobilenetv2` |
-| **`exp04a_resnet50`** | **Track D1 (Arsitektur):** Apakah backbone `resnet50` mengungguli `mobilenetv2` pada kondisi kontrol yang sama? | `model.arch=resnet50` | Pemenang Track C | Resolusi, augmentasi, & loss pemenang Track A–C, `freeze_base=true` |
-| **`exp04b_effnetb0`** | **Track D2 (Arsitektur):** Apakah backbone `efficientnetb0` lebih akurat/efisien dibanding `mobilenetv2` dan `resnet50`? | `model.arch=efficientnetb0` | Pemenang Track C | Resolusi, augmentasi, & loss pemenang Track A–C, `freeze_base=true` |
-| **`exp05_finetune`** | **Track E (Fine-Tuning):** Apakah membuka sebagian layer atas backbone (`fine_tune_at`) + `adamw` (`lr=1e-4`) meningkatkan `val f1_macro`? | `model.fine_tune_at=<cut>`, `train.optimizer=adamw`, `train.learning_rate=0.0001` | Pemenang Track D | Arsitektur, resolusi, augmentasi, & loss pemenang Track D (`freeze_base=true`) |
-| **`exp06_multiseed`** | **Track F (Stabilitas):** Seberapa konsisten kandidat final pada 3 seed berbeda (`42`, `123`, `2024`)? | `runtime.seed=123`, `runtime.seed=2024` | Konfigurasi pemenang Track E (atau D) | Seluruh konfigurasi lain dikunci (`data.shuffle_seed=42` tetap) |
-
-> **Catatan `model.fine_tune_at` pada Track E (`src/model.py:59-67`):** `fine_tune_at > 0` hanya aktif apabila `model.freeze_base=true` tetap dipertahankan (kode secara otomatis menjaga seluruh layer `BatchNormalization` di backbone tetap *frozen* agar training stabil). Cek total layer arsitektur pemenang via `python main.py --check` sebelum menentukan indeks `fine_tune_at` (misal `100` untuk `mobilenetv2` yang memiliki ~154 layer).
-
-### 4.2 Perintah CLI Siap Salin per Eksperimen
-
-```bash
-# --- EXP00a: Simple CNN Baseline ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=simple_cnn \
-  --set data.augment=false --set data.normalize=div255 \
-  --set runtime.run_name=exp00a_simple_cnn
-
-# --- EXP00b: MobileNetV2 Control Baseline (Tanpa Augmentasi) ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=mobilenetv2 \
-  --set data.augment=false --set runtime.run_name=exp00b_mobilenet_ctrl
-
-# --- EXP01: Track A - Efek Data Augmentation ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=mobilenetv2 \
-  --set data.augment=true --set runtime.run_name=exp01_aug
-
-# --- EXP02a: Track B1 - Tanpa Class Weight ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set train.class_weight=none \
-  --set runtime.run_name=exp02a_noweight
-
-# --- EXP02b: Track B2 - Focal Loss ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set train.class_weight=none --set train.loss=focal \
-  --set runtime.run_name=exp02b_focal
-
-# --- EXP03: Track C - Resolusi 224x224 (sesuaikan pemenang Track B) ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set data.img_height=224 --set data.img_width=224 \
-  --set runtime.run_name=exp03_res224
-
-# --- EXP04a & EXP04b: Track D - Perbandingan Arsitektur (sesuaikan resolusi pemenang Track C) ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=resnet50 \
-  --set data.img_height=224 --set data.img_width=224 \
-  --set runtime.run_name=exp04a_resnet50
-
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=efficientnetb0 \
-  --set data.img_height=224 --set data.img_width=224 \
-  --set runtime.run_name=exp04b_effnetb0
-
-# --- EXP05: Track E - Partial Fine-Tuning (contoh di MobileNetV2, sesuaikan pemenang Track D) ---
-python main.py --yes --config configs/default.yaml \
-  --set data.root=$DATA_ROOT --set runtime.runs_dir=$RUNS_DIR --set runtime.device=gpu \
-  --set eval.eval_split=val --set model.arch=mobilenetv2 \
-  --set data.img_height=224 --set data.img_width=224 \
-  --set model.freeze_base=true --set model.fine_tune_at=100 \
-  --set train.optimizer=adamw --set train.learning_rate=0.0001 \
-  --set train.epochs=30 --set runtime.run_name=exp05_finetune
-
-# --- EXP06: Track F - Multi-Seed pada Kandidat Final (jalankan juga seed=2024) ---
-python main.py --yes --config $RUNS_DIR/<best_run>/config_used.yaml \
-  --set runtime.seed=123 --set runtime.run_name=exp06_seed123
-```
+| # | Dimensi | Konfigurasi Terkunci / Nilai Eksperimen (`src/config.py`) |
+| :---: | :--- | :--- |
+| **1** | **Dataset** | Kaggle `emmarex/plantdisease` → `data.root=/kaggle/input/datasets/emmarex/plantdisease/PlantVillage`, 15 kelas, `data.deduplicate=true` (buang 14 duplikat MD5 *in-memory*). |
+| **2** | **Data Splitting** | `val_split=0.15`, `test_split=0.15` (`70/15/15`), `split_strategy=stratified`, `group_same_leaf=true`, `shuffle_seed=42` terkunci. |
+| **3** | **Preprocessing** | `224×224` (`img_height=224`, `img_width=224`), interpolasi bilinear, `channels=3` (RGB), `rescale=true`, `normalize=imagenet` (per-backbone `preprocess_input`). |
+| **4** | **Augmentation** | Hanya `train` (*batched* di `[0, 1]`): `aug_hflip=true`, `aug_vflip=true`, `aug_rotation=0.08` (~±29°), `aug_width_shift=0.10`, `aug_height_shift=0.10`, `aug_zoom=0.12`, `aug_shear=0.0`, `aug_brightness=0.20`, `aug_contrast=0.20`, `aug_fill_mode=reflect`. |
+| **5** | **Model** | Pretrained `weights=imagenet`, head `GAP → Dense(256)+BN+ReLU → Dropout(0.3) → Dense(15, softmax, float32)`. Batas blok residual terverifikasi Keras 3.15.1: `mobilenetv2` (`154` layer, cut **`107`** `block_12_expand`), `efficientnetb0` (`237` layer, cut **`162`** `block6a_expand_conv`), `resnet50` (`175` layer, cut **`143`** `conv5_block1_1_conv`). Seluruh `BatchNormalization` backbone tetap *frozen*. |
+| **6** | **Training** | `batch_size=64` (32/GPU T4×2). Stage 1 (Warmup Head): `optimizer=adam`, `lr=0.001`, `epochs=10`. Stage 2 (Fine-Tune): `optimizer=adamw`, `lr=0.0001`, `epochs=25`. |
+| **7** | **Loss & Regularization** | Run `m1`–`m4`: `loss=categorical_crossentropy`, `label_smoothing=0.05`, `class_weight=balanced`, `dropout=0.3`, `l2_weight_decay=0.0001`. Run `m5`: `loss=focal`, `class_weight=none`, `label_smoothing=0.0`. |
+| **8** | **Learning Strategy** | 2-Stage *Warm-Start* via `runtime.resume_from=<stage1>/best.keras`, `ReduceLROnPlateau` (`val_loss`, `factor=0.5`, `patience=3`, `min_lr=1e-6`), `EarlyStopping` (`val_loss`, `patience=6`, `restore_best_weights=true`), `ModelCheckpoint` (`val_accuracy`, `save_best_only=true`). |
+| **9** | **Evaluation** | Wajib `eval.eval_split=val` selama `m1`–`m6`; `test` hanya 1× di akhir (`--eval`). Primer: `f1_macro`; sekunder: *worst-class recall*, `accuracy`, `top_3_accuracy`, `ECE` (10 bins), `confused_pairs`, `misclassified_grid`, `gradcam_grid`, dan ukuran `best.keras` (MB). |
+| **10** | **Compute** | Kaggle T4×2 (`configs/kaggle_t4x2.yaml`): `device=gpu`, `strategy=auto` (`MirroredStrategy`), `mixed_precision=mixed_float16`, `cache=memory`, `prefetch=0` (`AUTOTUNE`), `num_parallel_calls=0`. Fallback CPU: `configs/default.yaml` (`mixed_precision=off`, `batch_size=32`, `num_parallel_calls=4`). |
+| **11** | **Experiment & Reproducibility** | `runtime.seed=42` (utama), tambahan `123` & `2024` pada kandidat final (`m6`); `runs/<run_id>/` menyimpan `config_used.{yaml,json}`, `device.json`, `history.{csv,json}`, `class_names.json`, `dataset_audit.json`, dan `experiment_leaderboard.csv`. |
 
 ---
 
-## 5. Kriteria Evaluasi & Pemilihan Model untuk Aplikasi / UI
+## 4. Matriks Eksperimen Final (`m1`–`m6`) & Cara Eksekusi di Kaggle
 
-Model dengan `accuracy` tertinggi belum tentu layak untuk aplikasi/UI maupun ilmiah. Pemilihan model final ditentukan oleh dua lapis kriteria:
+Seluruh matriks ini sudah tertanam langsung di Cell 5 [notebook/kaggle_experiment_runner.ipynb](notebook/kaggle_experiment_runner.ipynb) (yang memanggil `main.py --yes` dengan `COMMON_OVERRIDES` + `resume_from` otomatis):
 
-### 5.1 Kriteria Ilmiah (`val_metrics.json`, Error Analysis & Grad-CAM)
-1. **Metrik Primer — `f1_macro` pada `val`:** Memberikan bobot setara bagi seluruh kelas, termasuk kelas minoritas (`Potato___healthy` 152 gambar), sehingga model tidak sekadar menghafal kelas mayoritas.
-2. **Metrik Sekunder & Error Analysis:**
-   - **Worst-Class Recall & F1 (`val_per_class.csv`):** Pastikan tidak ada satu kelas penyakit yang kolaps (misalnya recall jauh lebih rendah dibanding kelas lain).
-   - **Top-K Accuracy & Kalibrasi Confidence (`val_metrics.json`, `val_confidence_calibration.png`):** Pantau `top_k_accuracy` dan **ECE (Expected Calibration Error)** agar probabilitas yang ditampilkan di UI tidak *overconfident* pada prediksi salah.
-   - **Top Confused Pairs & High-Confidence Errors (`val_confused_pairs.csv`, `val_misclassified.csv`, `val_misclassified_grid.png`):** Periksa pasangan penyakit yang paling sering tertukar dan sampel salah prediksi dengan confidence tertinggi.
-   - **Audit Grad-CAM (`val_gradcam_grid.png`):** Verifikasi bahwa aktivasi berfokus pada **gejala bercak/jaringan daun**, bukan pada latar belakang studio (*shortcut learning*).
-   - **Generalization Gap (`history.csv`):** Amati selisih `accuracy - val_accuracy` dan bentuk kurva `val_loss` pada `val_loss_accuracy.png`. Model dengan `val f1_macro` stabil dan gap kecil lebih diprioritaskan daripada model dengan training accuracy 99.9% namun `val_loss` menanjak.
-   - **Stabilitas Multi-Seed (`exp06`):** Variasi (`SD`) antar-seed rendah dan peningkatan terhadap kontrol (`exp00b`) konsisten di seluruh seed.
+| Batch | Run ID | Stage & Parent (`resume_from`) | Perubahan Kunci | Tujuan |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | `m1_mobilenetv2_head` | Stage 1 (Frozen, 10 ep, `lr=1e-3`) | `mobilenetv2`, `fine_tune_at=0` | Baseline ringan & warmup head `m2` |
+| **1** | `m2_mobilenetv2_ft` | Stage 2 ← `m1/best.keras` (25 ep, `lr=1e-4`) | `mobilenetv2`, `fine_tune_at=107`, `adamw` | **Kandidat Utama UI Ringan** (uji H1) |
+| **1** | `m3a_effnetb0_head` | Stage 1 (Frozen, 10 ep, `lr=1e-3`) | `efficientnetb0`, `fine_tune_at=0` | Warmup head `m3b` |
+| **1** | `m3b_effnetb0_ft` | Stage 2 ← `m3a/best.keras` (25 ep, `lr=1e-4`) | `efficientnetb0`, `fine_tune_at=162`, `adamw` | **Komparasi EfficientNetB0** (uji H2) |
+| **2** | `m4a_resnet50_head` | Stage 1 (Frozen, 10 ep, `lr=1e-3`) | `resnet50`, `fine_tune_at=0` | Warmup head `m4b` |
+| **2** | `m4b_resnet50_ft` | Stage 2 ← `m4a/best.keras` (25 ep, `lr=1e-4`) | `resnet50`, `fine_tune_at=143`, `adamw` | **Komparasi ResNet50** (uji H2) |
+| **3** | `m5_focal_check` | Stage 2 ← `<pemenang_head>/best.keras` | `loss=focal`, `class_weight=none`, `ls=0.0` | **Uji Imbalance & Kalibrasi ECE** (uji H3) |
+| **3** | `m6_seed123_head` → `m6_seed123_ft` | 2-Stage penuh (`WINNER_ARCH`) | `runtime.seed=123` | **Stabilitas Multi-Seed** (uji H4) |
+| **3** | `m6_seed2024_head` → `m6_seed2024_ft` | 2-Stage penuh (`WINNER_ARCH`) | `runtime.seed=2024` | **Stabilitas Multi-Seed** (uji H4) |
+| **Final** | `FINAL_TEST` (Cell 9) | 1× `--eval` pada split **`test`** | `eval.eval_split=test` | Evaluasi akhir + kemas `ui_model_bundle.zip` |
 
-### 5.2 Kriteria Kelayakan Aplikasi / UI
-1. **Trade-off Akurasi vs Ukuran & Latensi Inferensi:**
-   - Jika selisih `val f1_macro` antara model berat (`resnet50`/`vgg16`) dan model ringan (`mobilenetv2`/`efficientnetb0`) kecil (< 0.01–0.02), **pilih model yang lebih ringan** untuk menjaga responsivitas UI lokal dan mempermudah opsi ekspor ke TFLite bila dibutuhkan.
-2. **Kontrak Artefak Serah Terima (`runs/<final_run>/`):**
-   Aplikasi/UI wajib menerima paket artefak yang lengkap dan berasal dari *run* yang sama:
-   - `best.keras` (bobot model terbaik berdasarkan `checkpoint_monitor`)
-   - `class_names.json` (pemetaan indeks output softmax → nama kelas)
-   - `config_used.json` (sumber kebenaran `img_height`, `img_width`, `channels`, `rescale`, `normalize`, dan `model.arch`)
-3. **Invariansi Preprocessing di Aplikasi/UI:**
-   - Kode inferensi UI **wajib** mereplikasi urutan preprocessing yang identik dengan `src/data.py:122-159` berdasarkan nilai di `config_used.json` (khususnya `preprocess_input` sesuai `model.arch` bila `normalize=imagenet`, karena rentang input `mobilenetv2` `[-1, 1]`, `resnet50`/`vgg16` Caffe BGR zero-centered, dan `efficientnetb0` `[0, 255]` berbeda satu sama lain).
-4. **Uji Realistis Tambahan Sebelum Demo Aplikasi:**
-   - Selain `test_metrics.json` (yang dievaluasi 1x di akhir), lakukan uji kualitatif pada beberapa gambar daun dari sumber luar/kamera HP di UI untuk mendokumentasikan keterbatasan *domain shift* di laporan UAS.
+> **Catatan CLI Lokal Sebelum Push:** Jalankan `python scripts/smoke_test.py` dan `pytest tests/test_error_analysis.py -v` untuk memverifikasi pipeline di CPU lokal sebelum melakukan `git push` ke GitHub.
 
 ---
 
-## 6. Experiment Log & Template Pelaporan
+## 5. Experiment Log Template
 
-Salin dan isi tabel ini setelah setiap run di Kaggle selesai agar seluruh eksperimen dapat diaudit dan dibandingkan secara adil:
-
-| Run ID | Hipotesis / Perubahan | `eval_split` | Seed | `f1_macro` | `accuracy` | Worst-Class Recall | Best Epoch | Ukuran `best.keras` | Catatan / Keputusan Next Step |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| `exp00a_simple_cnn` | Scratch baseline (no aug) | `val` | 42 | | | | | | |
-| `exp00b_mobilenet_ctrl` | Transfer baseline (no aug) | `val` | 42 | | | | | | |
-| `exp01_aug` | + Data augmentation | `val` | 42 | | | | | | |
-| `exp02a_noweight` | `class_weight=none` | `val` | 42 | | | | | | |
-| `exp02b_focal` | `loss=focal` | `val` | 42 | | | | | | |
-| `exp03_res224` | `224x224` resolution | `val` | 42 | | | | | | |
-| `exp04a_resnet50` | Backbone `resnet50` | `val` | 42 | | | | | | |
-| `exp04b_effnetb0` | Backbone `efficientnetb0` | `val` | 42 | | | | | | |
-| `exp05_finetune` | `fine_tune_at` + `adamw` | `val` | 42 | | | | | | |
-| `exp06_seed123` | Multi-seed check | `val` | 123 | | | | | | |
-| `exp06_seed2024` | Multi-seed check | `val` | 2024 | | | | | | |
-| **`FINAL_TEST`** | **1x evaluasi model final** | **`test`** | **42** | | | | **—** | | **Kunci untuk UI & Laporan** |
+| Run ID | Tahap | Seed | `val f1_macro` | `val acc` | `top_3` | Worst Recall | `ECE` | Train–Val Gap | `best.keras` (MB) | Catatan / Keputusan |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| `m1_mobilenetv2_head` | S1 | 42 | | | | | | | | |
+| `m2_mobilenetv2_ft` | S2 | 42 | | | | | | | | |
+| `m3a_effnetb0_head` | S1 | 42 | | | | | | | | |
+| `m3b_effnetb0_ft` | S2 | 42 | | | | | | | | |
+| `m4a_resnet50_head` | S1 | 42 | | | | | | | | |
+| `m4b_resnet50_ft` | S2 | 42 | | | | | | | | |
+| `m5_focal_check` | S2 | 42 | | | | | | | | |
+| `m6_seed123_ft` | S2 | 123 | | | | | | | | |
+| `m6_seed2024_ft` | S2 | 2024 | | | | | | | | |
+| **`FINAL_TEST`** | **`test`** | **42** | | | | | | **—** | | **Kunci untuk UI & Laporan** |
