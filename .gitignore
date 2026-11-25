@@ -1,7 +1,22 @@
 # dataset & output - tidak masuk git
 data/
 runs/
-results/
+
+# results deliverable: track documentation (.md) and lightweight metadata only
+results/*
+!results/README.md
+!results/artifacts/
+results/artifacts/*
+!results/artifacts/*.md
+!results/artifacts/labels.txt
+!results/artifacts/class_names.json
+!results/artifacts/model_metadata.json
+!results/reports/
+results/reports/*
+!results/reports/REPORTS_INDEX.md
+
+# large archives & binaries
+*.zip
 
 # python
 __pycache__/
