@@ -228,9 +228,32 @@ def _predict_keras(fp32_model: keras.Model, dataset) -> tuple[np.ndarray, np.nda
     return np.concatenate(y_true), np.concatenate(y_pred)
 
 
+def _load_tflite_interpreter(tflite_path: Path, num_threads: int = 4):
+    """Allocate a TFLite Interpreter, falling back without default delegates if XNNPACK fails."""
+    try:
+        interpreter = tf.lite.Interpreter(model_path=str(tflite_path), num_threads=num_threads)
+        interpreter.allocate_tensors()
+        return interpreter
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "xnnpack" not in msg and "delegate" not in msg:
+            raise
+        LOGGER.warning(
+            "Default XNNPACK delegate failed for %s (%s); falling back to BUILTIN_WITHOUT_DEFAULT_DELEGATES.",
+            tflite_path.name,
+            exc,
+        )
+        interpreter = tf.lite.Interpreter(
+            model_path=str(tflite_path),
+            num_threads=num_threads,
+            experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES,
+        )
+        interpreter.allocate_tensors()
+        return interpreter
+
+
 def _predict_tflite(tflite_path: Path, dataset, num_threads: int = 4) -> tuple[np.ndarray, np.ndarray]:
-    interpreter = tf.lite.Interpreter(model_path=str(tflite_path), num_threads=num_threads)
-    interpreter.allocate_tensors()
+    interpreter = _load_tflite_interpreter(tflite_path, num_threads=num_threads)
     in_det = interpreter.get_input_details()[0]
     out_det = interpreter.get_output_details()[0]
     in_idx, out_idx = in_det["index"], out_det["index"]
@@ -275,8 +298,7 @@ def _benchmark_keras_latency(
 def _benchmark_tflite_latency(
     tflite_path: Path, sample_batch: np.ndarray, num_threads: int, warmup: int, runs: int
 ) -> dict[str, float]:
-    interpreter = tf.lite.Interpreter(model_path=str(tflite_path), num_threads=num_threads)
-    interpreter.allocate_tensors()
+    interpreter = _load_tflite_interpreter(tflite_path, num_threads=num_threads)
     in_idx = interpreter.get_input_details()[0]["index"]
     out_idx = interpreter.get_output_details()[0]["index"]
     x = np.asarray(sample_batch, dtype=np.float32)
@@ -684,8 +706,19 @@ class PlantDiseasePredictor:
             if qkey not in self.model_info["files"]:
                 raise ValueError(f"Quant variant not found: {qkey}")
             tpath = self.bundle_dir / self.model_info["files"][qkey]
-            self._interpreter = tf.lite.Interpreter(model_path=str(tpath), num_threads=num_threads)
-            self._interpreter.allocate_tensors()
+            try:
+                self._interpreter = tf.lite.Interpreter(model_path=str(tpath), num_threads=num_threads)
+                self._interpreter.allocate_tensors()
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "xnnpack" not in msg and "delegate" not in msg:
+                    raise
+                self._interpreter = tf.lite.Interpreter(
+                    model_path=str(tpath),
+                    num_threads=num_threads,
+                    experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES,
+                )
+                self._interpreter.allocate_tensors()
             self._in_idx = self._interpreter.get_input_details()[0]["index"]
             self._out_idx = self._interpreter.get_output_details()[0]["index"]
 
@@ -1049,6 +1082,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    tf.get_logger().setLevel("ERROR")
     args = parse_args(argv)
     set_seed(args.seed)
     configure_device("cpu")

@@ -470,3 +470,41 @@ def test_step_history_logger_throttles_lr_reads(tmp_path):
     with open(csv_path, encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert [int(r["global_step"]) for r in rows] == [1, 5, 10]
+
+
+def test_tflite_interpreter_xnnpack_fallback(tmp_path, monkeypatch):
+    import pytest
+    import tensorflow as tf
+    from scripts.export_tflite import _load_tflite_interpreter
+
+    dummy_path = tmp_path / "dummy_int8.tflite"
+    dummy_path.write_bytes(b"TFL3")
+    no_delegates = tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
+    seen_resolvers = []
+
+    class StubInterpreter:
+        def __init__(self, model_path=None, num_threads=None, experimental_op_resolver_type=None):
+            self.resolver = experimental_op_resolver_type
+            seen_resolvers.append(experimental_op_resolver_type)
+
+        def allocate_tensors(self):
+            if self.resolver != no_delegates:
+                raise RuntimeError(
+                    "failed to create XNNPACK runtimeNode number 125 (TfLiteXNNPackDelegate) failed to prepare."
+                )
+
+    monkeypatch.setattr(tf.lite, "Interpreter", StubInterpreter)
+    interp = _load_tflite_interpreter(dummy_path, num_threads=2)
+    assert isinstance(interp, StubInterpreter)
+    assert seen_resolvers == [None, no_delegates]
+
+    class UnrelatedFailInterpreter:
+        def __init__(self, **kwargs):
+            pass
+
+        def allocate_tensors(self):
+            raise RuntimeError("unrelated failure")
+
+    monkeypatch.setattr(tf.lite, "Interpreter", UnrelatedFailInterpreter)
+    with pytest.raises(RuntimeError, match="unrelated failure"):
+        _load_tflite_interpreter(dummy_path, num_threads=2)

@@ -45,9 +45,10 @@ def build_cells() -> list[dict]:
 Notebook ini menjalankan eksperimen **PlantVile** secara penuh, bersih (*noise-free*), dan terstandar untuk **3 arsitektur *mobile-edge*** (`MobileNetV2`, `EfficientNet-B0`, dan `MobileNetV3-Large`) dari branch `experiment-arfi`.
 
 ### Pengaturan Kaggle Sebelum Menjalankan (*Save & Run All*)
-1. **Accelerator:** `GPU T4 x2` (atau `None` untuk audit CPU).
+1. **Accelerator:** `GPU T4 x2` (atau `None` untuk audit CPU / mode *resume deliverable* tanpa training ulang).
 2. **Internet:** `ON` (untuk `git clone` dan bobot ImageNet).
 3. **Dataset Input:** Tambahkan `emmarex/plantdisease` (`/kaggle/input/datasets/emmarex/plantdisease/PlantVillage`).
+4. **Mode Resume / Deliverable Saja (Opsional, Tanpa Train Ulang):** Lampirkan Output notebook sebelumnya lewat **Add Input → Your Work / Notebook Output** (CPU-only sudah cukup). Sel 1 otomatis menyalin folder `runs/` yang sudah selesai sehingga Sel 4 & 6 melewati training/eval yang ada dan langsung membuat ekspor TFLite + ZIP.
 
 ### Ringkasan Tahapan (8 Sel Kode)
 | Sel | Tahap | Output Utama |
@@ -109,7 +110,61 @@ DATA_ROOT = next((p for p in DATA_ROOT_CANDIDATES if p.is_dir()), None)
 assert DATA_ROOT is not None, f"Dataset tidak ditemukan di: {[str(p) for p in DATA_ROOT_CANDIDATES]}"
 DATA_ROOT = DATA_ROOT.resolve()
 
-# Regex filter for benign TF/XLA/CUDA initialization chatter
+# Optional path override; None auto-detects attached Kaggle notebook outputs containing completed runs
+PRETRAINED_RUNS_DIR = None
+KNOWN_RUN_IDS = (
+    "m1_mobilenetv2_head",
+    "m2_mobilenetv2_ft",
+    "m3a_effnetb0_head",
+    "m3b_effnetb0_ft",
+    "m4a_mobilenetv3l_head",
+    "m4b_mobilenetv3l_ft",
+)
+
+
+def _find_pretrained_runs_dir(input_root: Path, data_root: Path, known_ids: tuple[str, ...]) -> Path | None:
+    queue = deque([(input_root, 0)])
+    while queue:
+        cur, depth = queue.popleft()
+        try:
+            res = cur.resolve()
+        except OSError:
+            continue
+        if res == data_root or data_root in res.parents:
+            continue
+        if any((cur / rid / "best.keras").is_file() for rid in known_ids):
+            return cur
+        if depth < 5:
+            try:
+                children = sorted(p for p in cur.iterdir() if p.is_dir())
+            except OSError:
+                continue
+            # Prefer directories named 'runs' first at the next depth level
+            children.sort(key=lambda p: (p.name != "runs", p.name))
+            for child in children:
+                queue.append((child, depth + 1))
+    return None
+
+
+pretrained_src = Path(PRETRAINED_RUNS_DIR) if PRETRAINED_RUNS_DIR else (
+    _find_pretrained_runs_dir(Path("/kaggle/input"), DATA_ROOT, KNOWN_RUN_IDS)
+    if IS_KAGGLE and Path("/kaggle/input").is_dir()
+    else None
+)
+imported_runs = []
+if pretrained_src is not None and pretrained_src.is_dir():
+    for rid in KNOWN_RUN_IDS:
+        src_run = pretrained_src / rid
+        dst_run = RUNS_DIR / rid
+        if (src_run / "best.keras").is_file() and not (dst_run / "best.keras").is_file():
+            shutil.copytree(src_run, dst_run, dirs_exist_ok=True)
+            imported_runs.append(rid)
+    audit_src = pretrained_src / "dataset_audit.json"
+    audit_dst = RUNS_DIR / "dataset_audit.json"
+    if audit_src.is_file() and not audit_dst.is_file():
+        shutil.copy2(audit_src, audit_dst)
+
+# Regex filter for benign TF/XLA/CUDA/TFLite SavedModel chatter
 _NOISE_RE = re.compile(
     r"(^WARNING: All log messages before absl::InitializeLog|"
     r"^WARNING:tensorflow:|"
@@ -118,7 +173,11 @@ _NOISE_RE = re.compile(
     r"Unable to register cuFFT|Unable to register cuDNN|Unable to register cuBLAS|"
     r"computation_placer|successful NUMA|NUMA node|"
     r"This TensorFlow binary is optimized|XLA service|Loaded runtime CuDNN|"
-    r"AllReduce|local_device_option|TensorFlow GPU support is not available)"
+    r"AllReduce|local_device_option|TensorFlow GPU support is not available|"
+    r"^Saved artifact at |^\\* Endpoint |^args_0 \\(POSITIONAL_ONLY\\):|"
+    r"^Output Type:|^Captures:|TensorSpec\\(shape=.*dtype=tf\\.resource|"
+    r"^TensorSpec\\(shape=\\(None,|^fully_quantize:|"
+    r"^INFO: Created TensorFlow Lite XNNPACK)"
 )
 
 
@@ -196,6 +255,7 @@ env_table = pd.DataFrame([
     ("Config Preset", CONFIG_PATH),
     ("Data Root", str(DATA_ROOT)),
     ("Runs Dir", str(RUNS_DIR)),
+    ("Pretrained Runs", f"{len(imported_runs)} imported from {pretrained_src}" if imported_runs else "None (fresh training)"),
     ("Free Disk", f"{disk.free / (1024**3):.2f} GB / {disk.total / (1024**3):.2f} GB"),
 ], columns=["Setting", "Value"])
 ipy_display(env_table)
