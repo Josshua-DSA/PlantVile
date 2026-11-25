@@ -1,0 +1,936 @@
+<!doctype html>
+<!--
+  PlantVile — dashboard hasil training CNN (PlantVillage).
+  Satu file, tanpa build step. Buka langsung, atau (disarankan) lewat server
+  supaya folder runs/ bisa dibaca:
+      python -m http.server 8000
+      http://localhost:8000/dashboard.html
+  Tanpa server, dashboard memakai data demo (angka contoh, ditandai "DEMO").
+  Muat run asli: pilih dari dropdown, atau isi path di kotak kanan atas,
+  atau buka dashboard.html?run=runs/run_20261125_101010
+-->
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlantVile · Klasifikasi Penyakit Daun</title>
+<meta name="description" content="Dashboard hasil training CNN untuk klasifikasi penyakit daun PlantVillage, 15 kelas.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%237be495'/%3E%3Cpath d='M12 19V9M12 12c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 3-5 7-5 0 3-3 5-7 5Z' fill='none' stroke='%23061510' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ─────────────────────────────────────────────────────────────
+   Tokens
+   ───────────────────────────────────────────────────────────── */
+:root{
+  --ink:#06100b;
+  --ink-2:#0a1712;
+  --mist:#e6f4ea;
+  --muted:rgba(230,244,234,.56);
+  --faint:rgba(230,244,234,.32);
+  --leaf:#7be495;
+  --leaf-deep:#1d6b45;
+  --amber:#f2c46b;
+  --rose:#f08a7a;
+
+  --glass:rgba(255,255,255,.052);
+  --glass-hi:rgba(255,255,255,.085);
+  --rim:rgba(255,255,255,.14);
+
+  --r-lg:28px;
+  --r-md:18px;
+  --r-sm:11px;
+
+  --sans:"Instrument Sans","Segoe UI",sans-serif;
+  --serif:"Fraunces",Georgia,serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+
+  --pad:clamp(16px,3.2vw,44px);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  min-height:100vh;
+  font-family:var(--sans);
+  font-size:15px;
+  line-height:1.55;
+  color:var(--mist);
+  background:var(--ink);
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Atmosphere: greenhouse dusk. Coloured light so the glass has
+   something to refract.
+   ───────────────────────────────────────────────────────────── */
+.atmos{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.atmos::before{
+  content:"";position:absolute;inset:-10%;
+  background:
+    radial-gradient(60% 45% at 50% -8%, rgba(123,228,149,.20), transparent 70%),
+    radial-gradient(45% 40% at 8% 12%, rgba(43,150,110,.30), transparent 70%),
+    radial-gradient(50% 45% at 92% 78%, rgba(242,196,107,.16), transparent 72%),
+    radial-gradient(55% 50% at 30% 96%, rgba(20,92,70,.42), transparent 72%),
+    linear-gradient(180deg,#07130d 0%,#06100b 55%,#050d09 100%);
+}
+.atmos::after{
+  content:"";position:absolute;inset:0;opacity:.055;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.blob{position:absolute;border-radius:50%;filter:blur(90px);will-change:transform}
+.b1{width:46vw;height:46vw;left:-8vw;top:-6vw;background:rgba(60,190,130,.34);animation:drift1 42s ease-in-out infinite alternate}
+.b2{width:38vw;height:38vw;right:-6vw;top:22vh;background:rgba(242,196,107,.20);animation:drift2 56s ease-in-out infinite alternate}
+.b3{width:42vw;height:42vw;left:24vw;bottom:-16vw;background:rgba(24,120,92,.40);animation:drift3 64s ease-in-out infinite alternate}
+@keyframes drift1{to{transform:translate3d(6vw,4vh,0) scale(1.15)}}
+@keyframes drift2{to{transform:translate3d(-7vw,7vh,0) scale(1.2)}}
+@keyframes drift3{to{transform:translate3d(4vw,-6vh,0) scale(1.1)}}
+
+/* ─────────────────────────────────────────────────────────────
+   Glass primitive
+   ───────────────────────────────────────────────────────────── */
+.glass{
+  position:relative;
+  border:1px solid transparent;
+  border-radius:var(--r-lg);
+  background-image:
+    linear-gradient(var(--glass),var(--glass)),
+    linear-gradient(158deg,rgba(255,255,255,.34),rgba(255,255,255,.02) 38%,rgba(255,255,255,.10) 72%,rgba(255,255,255,.26));
+  background-origin:border-box;
+  background-clip:padding-box,border-box;
+  -webkit-backdrop-filter:blur(26px) saturate(170%);
+  backdrop-filter:blur(26px) saturate(170%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.20),
+    inset 0 -1px 0 rgba(0,0,0,.28),
+    0 22px 60px -26px rgba(0,0,0,.85);
+  isolation:isolate;
+}
+/* specular sheen that follows the pointer */
+.glass::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(38% 60% at var(--mx,50%) var(--my,0%),
+             rgba(255,255,255,.16), rgba(255,255,255,.05) 45%, transparent 72%);
+  opacity:0;transition:opacity .45s ease;
+}
+.glass:hover::after{opacity:1}
+
+/* ─────────────────────────────────────────────────────────────
+   Shell
+   ───────────────────────────────────────────────────────────── */
+.shell{position:relative;z-index:2;max-width:1460px;margin:0 auto;padding:0 var(--pad) 72px}
+
+.topbar{
+  position:sticky;top:14px;z-index:40;
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  margin:14px 0 clamp(28px,5vw,56px);
+  padding:11px 14px 11px 20px;
+  border-radius:999px;
+}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.mark{
+  width:30px;height:30px;flex:none;border-radius:10px;display:grid;place-items:center;
+  background:linear-gradient(150deg,rgba(123,228,149,.9),rgba(29,107,69,.9));
+  box-shadow:0 0 0 1px rgba(255,255,255,.28) inset,0 8px 18px -8px rgba(123,228,149,.8);
+}
+.mark svg{width:16px;height:16px;fill:none;stroke:#04150d;stroke-width:2.1;stroke-linecap:round}
+.brand b{font-family:var(--serif);font-weight:600;font-size:17px;letter-spacing:-.01em}
+.brand span{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.spacer{flex:1 1 auto}
+
+.pick{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pick label{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.pick select,.pick input{
+  font:inherit;font-size:12.5px;color:var(--mist);
+  background:rgba(255,255,255,.06);
+  border:1px solid var(--rim);border-radius:999px;
+  padding:7px 13px;max-width:230px;
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+}
+.pick select{appearance:none;padding-right:30px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 51%,calc(100% - 12px) 51%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.pick input{width:210px}
+.pick input::placeholder{color:var(--faint)}
+.pick select:focus-visible,.pick input:focus-visible,button:focus-visible{
+  outline:2px solid var(--leaf);outline-offset:2px}
+.badge{
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  padding:5px 11px;border-radius:999px;white-space:nowrap;
+  border:1px solid rgba(242,196,107,.34);color:var(--amber);
+  background:rgba(242,196,107,.10);
+}
+.badge.live{border-color:rgba(123,228,149,.38);color:var(--leaf);background:rgba(123,228,149,.10)}
+
+.notice{
+  display:none;gap:10px;align-items:flex-start;
+  margin:0 0 26px;padding:13px 18px;border-radius:var(--r-md);
+  font-size:13px;color:rgba(230,244,234,.82);
+  background:rgba(242,196,107,.08);border:1px solid rgba(242,196,107,.24);
+}
+.notice.on{display:flex}
+.notice code{font-family:var(--mono);font-size:12px;color:var(--amber)}
+
+/* ─────────────────────────────────────────────────────────────
+   Hero
+   ───────────────────────────────────────────────────────────── */
+.hero{
+  display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);
+  gap:clamp(28px,4vw,64px);align-items:center;
+  margin-bottom:clamp(28px,4vw,52px);
+}
+.eyebrow{
+  margin:0 0 18px;font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--faint);
+  display:flex;align-items:center;gap:10px;
+}
+.eyebrow::before{content:"";width:26px;height:1px;background:rgba(123,228,149,.55)}
+h1{
+  margin:0;font-family:var(--serif);font-weight:400;
+  font-size:clamp(30px,3.9vw,54px);line-height:1.06;letter-spacing:-.022em;
+  font-variation-settings:"SOFT" 20,"WONK" 0;
+  text-wrap:balance;
+}
+h1 em{
+  font-style:italic;font-weight:500;
+  font-variation-settings:"SOFT" 60,"WONK" 1;
+  background:linear-gradient(96deg,var(--leaf) 8%,#bff0c8 52%,var(--amber) 96%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.lede{margin:16px 0 0;max-width:46ch;color:var(--muted);font-size:14.5px}
+
+.runmeta{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0 0;padding:0;list-style:none}
+.runmeta li{
+  font-family:var(--mono);font-size:11px;letter-spacing:.03em;
+  padding:6px 11px;border-radius:var(--r-sm);
+  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);
+  color:rgba(230,244,234,.78);
+}
+.runmeta b{color:var(--mist);font-weight:500}
+
+/* the lens: stronger blur + chromatic rim = liquid glass */
+.lens-wrap{display:flex;flex-direction:column;align-items:center;gap:20px}
+.lens{
+  position:relative;width:min(300px,62vw);aspect-ratio:1;border-radius:50%;
+  display:grid;place-items:center;
+  -webkit-backdrop-filter:blur(40px) saturate(200%) brightness(1.08);
+  backdrop-filter:blur(40px) saturate(200%) brightness(1.08);
+  background:radial-gradient(circle at 32% 26%,rgba(255,255,255,.18),rgba(255,255,255,.03) 58%,rgba(255,255,255,.07));
+  box-shadow:
+    inset 0 2px 1px rgba(255,255,255,.42),
+    inset 0 -14px 30px -12px rgba(0,0,0,.5),
+    inset 0 0 60px rgba(123,228,149,.10),
+    0 0 0 1px rgba(255,255,255,.18),
+    0 0 0 7px rgba(255,255,255,.028),
+    0 40px 90px -40px rgba(0,0,0,.95),
+    -3px 0 18px -8px rgba(120,220,255,.32),
+     3px 0 18px -8px rgba(242,196,107,.30);
+}
+.lens svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.lens .track{fill:none;stroke:rgba(255,255,255,.09);stroke-width:7}
+.lens .prog{fill:none;stroke:url(#ringGrad);stroke-width:7;stroke-linecap:round;
+  filter:drop-shadow(0 0 9px rgba(123,228,149,.55))}
+.lens-num{
+  position:relative;font-family:var(--serif);font-weight:500;
+  font-size:clamp(42px,7.2vw,64px);line-height:1;letter-spacing:-.035em;
+  font-variant-numeric:tabular-nums;
+  font-variation-settings:"SOFT" 40,"WONK" 1;
+}
+.lens-num sup{font-size:.36em;font-weight:400;letter-spacing:0;vertical-align:super;color:var(--leaf)}
+.lens-cap{
+  position:absolute;bottom:22%;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--faint);
+}
+.lens-stats{display:flex;gap:26px;margin:0;padding:0;list-style:none;text-align:center}
+.lens-stats dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--faint)}
+.lens-stats dd{margin:3px 0 0;font-family:var(--serif);font-size:20px;font-weight:500;font-variant-numeric:tabular-nums}
+
+/* ─────────────────────────────────────────────────────────────
+   KPI ribbon (one bar, hairline dividers — not four cards)
+   ───────────────────────────────────────────────────────────── */
+.ribbon{
+  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));
+  padding:4px;border-radius:var(--r-md);margin-bottom:clamp(20px,3vw,30px);
+}
+.ribbon .cell{padding:16px 20px;border-left:1px solid rgba(255,255,255,.075)}
+.ribbon .cell:first-child{border-left:0}
+.ribbon .k{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;
+  text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+.ribbon .v{font-family:var(--serif);font-size:23px;font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:-.015em}
+.ribbon .v small{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);letter-spacing:0}
+
+/* ─────────────────────────────────────────────────────────────
+   Bento
+   ───────────────────────────────────────────────────────────── */
+.bento{
+  display:grid;gap:clamp(14px,1.6vw,20px);
+  grid-template-columns:repeat(12,minmax(0,1fr));
+  grid-template-areas:
+    "curves curves curves curves curves curves curves curves dist dist dist dist"
+    "matrix matrix matrix matrix matrix classes classes classes classes classes classes classes";
+}
+.panel{padding:20px 22px 18px;min-width:0}
+.p-curves{grid-area:curves}
+.p-dist{grid-area:dist}
+.p-matrix{grid-area:matrix}
+.p-classes{grid-area:classes}
+
+.panel-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.panel-head h2{
+  margin:0;font-family:var(--sans);font-size:13px;font-weight:600;letter-spacing:.01em;
+}
+.panel-head .sub{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint)}
+.legend{display:flex;gap:14px;margin-left:auto;list-style:none;margin-block:0;padding:0}
+.legend li{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.legend i{width:16px;height:2px;border-radius:2px;background:currentColor}
+.legend .c-train{color:rgba(230,244,234,.42)}
+.legend .c-val{color:var(--leaf)}
+
+/* charts */
+.chart-stack{display:flex;flex-direction:column;gap:6px}
+.chart-row{display:flex;align-items:baseline;gap:10px}
+.chart-row .lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--faint);width:44px;flex:none;padding-top:6px}
+.chart{flex:1;min-width:0}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart text{font-family:var(--mono);font-size:8.5px;fill:rgba(230,244,234,.30)}
+.spark .line{fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;
+  stroke-dasharray:var(--len,0);stroke-dashoffset:var(--len,0);
+  animation:draw 1.35s cubic-bezier(.22,.9,.2,1) forwards}
+.spark .area{opacity:0;animation:fade .9s ease .55s forwards}
+.spark .dot{opacity:0;animation:fade .5s ease 1.2s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+@keyframes fade{to{opacity:1}}
+
+/* distribution */
+.dist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.dist li{display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:11.5px}
+.dist .nm{color:rgba(230,244,234,.72);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dist .n{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.dist .bar{grid-column:1/-1;height:4px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden}
+.dist .bar i{display:block;height:100%;border-radius:99px;
+  background:linear-gradient(90deg,rgba(29,107,69,.9),var(--leaf));
+  transform-origin:left;animation:grow .9s cubic-bezier(.2,.9,.2,1) both}
+@keyframes grow{from{transform:scaleX(0)}}
+
+/* per-class table */
+.tbl-wrap{max-height:352px;overflow:auto;margin:0 -6px;padding:0 6px;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.tbl-wrap::-webkit-scrollbar{width:8px}
+.tbl-wrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:99px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead th{
+  position:sticky;top:0;z-index:1;text-align:left;
+  font-family:var(--mono);font-size:9px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--faint);font-weight:400;padding:0 8px 8px;
+  background:linear-gradient(rgba(8,20,15,.92),rgba(8,20,15,.72));
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+}
+thead th.num,tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody td{padding:7px 8px;border-top:1px solid rgba(255,255,255,.055)}
+tbody tr:hover td{background:rgba(255,255,255,.035)}
+td.idx,th.idx{width:26px;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+td.nm{max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:rgba(230,244,234,.86)}
+td.num{font-family:var(--mono);font-size:11px;color:rgba(230,244,234,.72)}
+td.barcell{width:32%}
+.f1wrap{display:flex;align-items:center;gap:10px}
+.f1bar{position:relative;flex:1;height:6px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden}
+.f1bar i{position:absolute;inset:0 auto 0 0;border-radius:99px;transform-origin:left;
+  animation:grow .8s cubic-bezier(.2,.9,.2,1) both}
+.f1wrap span{font-family:var(--mono);font-size:10.5px;color:rgba(230,244,234,.8);
+  font-variant-numeric:tabular-nums;width:38px;text-align:right;flex:none}
+
+/* confusion matrix */
+.matrix{display:grid;grid-template-columns:22px 1fr;grid-template-rows:1fr 22px;gap:6px}
+.mx-grid{display:grid;gap:2px;aspect-ratio:1}
+.mx-grid i{display:block;border-radius:2.5px;background:rgba(123,228,149,0);
+  transition:transform .16s ease,filter .16s ease}
+.mx-grid i:hover{transform:scale(1.55);filter:brightness(1.7);z-index:2;position:relative}
+.mx-ylab,.mx-xlab{display:grid;gap:2px;font-family:var(--mono);font-size:8px;color:var(--faint)}
+.mx-ylab{align-content:center;justify-items:end}
+.mx-xlab{align-content:start}
+.mx-ylab span,.mx-xlab span{display:grid;place-items:center;line-height:1}
+.mx-xlab span{writing-mode:vertical-rl}
+.mx-img{width:100%;border-radius:var(--r-sm);display:block;background:rgba(255,255,255,.04)}
+.mx-legend{display:flex;align-items:center;gap:8px;margin-top:12px;
+  font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.mx-legend .ramp{flex:1;height:5px;border-radius:99px;
+  background:linear-gradient(90deg,rgba(123,228,149,.06),rgba(123,228,149,.5),rgba(123,228,149,.95))}
+
+/* samples */
+.samples{margin-top:18px}
+.samples img{width:100%;border-radius:var(--r-sm);display:block;border:1px solid rgba(255,255,255,.08)}
+
+.foot{
+  margin-top:clamp(28px,4vw,44px);padding-top:20px;
+  border-top:1px solid rgba(255,255,255,.07);
+  display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--faint);
+}
+.foot a{color:rgba(230,244,234,.6);text-decoration:none;border-bottom:1px solid rgba(230,244,234,.2)}
+.foot a:hover{color:var(--leaf);border-color:var(--leaf)}
+
+/* entrance */
+.rise{animation:rise .8s cubic-bezier(.2,.85,.2,1) both;animation-delay:var(--d,0s)}
+@keyframes rise{from{opacity:0;transform:translateY(18px)}}
+
+@media (max-width:1080px){
+  .bento{grid-template-areas:"curves curves curves curves curves curves curves curves curves curves curves curves"
+    "dist dist dist dist dist dist matrix matrix matrix matrix matrix matrix"
+    "classes classes classes classes classes classes classes classes classes classes classes classes"}
+  .hero{grid-template-columns:1fr;gap:34px}
+  .lens-wrap{flex-direction:row;justify-content:flex-start;gap:32px}
+  .ribbon{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .ribbon .cell:nth-child(4){border-left:0}
+}
+@media (max-width:720px){
+  .topbar{border-radius:22px;padding:12px 14px}
+  .pick input{width:100%}
+  .ribbon{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ribbon .cell{padding:13px 15px}
+  .ribbon .cell:nth-child(3),.ribbon .cell:nth-child(5){border-left:0}
+  .ribbon .cell:nth-child(4){border-left:1px solid rgba(255,255,255,.075)}
+  .bento{grid-template-areas:"curves" "dist" "matrix" "classes";
+    grid-template-columns:1fr}
+  .lens-wrap{flex-direction:column;align-items:flex-start}
+  .lens-stats{gap:20px}
+  .panel{padding:17px 16px 15px}
+  td.barcell{display:none}
+  td.nm{max-width:150px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .spark .line{stroke-dasharray:none;stroke-dashoffset:0}
+  .spark .area,.spark .dot{opacity:1}
+  .glass::after{display:none}
+}
+</style>
+</head>
+<body>
+<div class="atmos" aria-hidden="true">
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+</div>
+
+<div class="shell">
+
+  <header class="topbar glass">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 21V9"/><path d="M12 12C12 7 8 4 4 4c0 5 4 8 8 8Z"/><path d="M12 15c0-4 3.6-6 8-6 0 4-3.6 6-8 6Z"/></svg>
+      </span>
+      <div>
+        <b>PlantVile</b><br>
+        <span>Neuro Computing</span>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="pick">
+      <label for="runSel">Run</label>
+      <select id="runSel" aria-label="Pilih hasil training"><option value="">Demo (contoh)</option></select>
+      <input id="runPath" type="text" spellcheck="false" placeholder="runs/run_..." aria-label="Path folder run">
+      <span class="badge" id="badge">Demo</span>
+    </div>
+  </header>
+
+  <div class="notice" id="notice" role="status">
+    <span aria-hidden="true">◎</span>
+    <span>Folder <code>runs/</code> tidak bisa dibaca dari <code>file://</code>.
+      Jalankan <code>python -m http.server 8000</code> di folder <code>PlantVile</code>,
+      lalu buka <code>http://localhost:8000/dashboard.html</code>. Sementara ini yang tampil data demo.</span>
+  </div>
+
+  <main>
+    <section class="hero rise" style="--d:.05s">
+      <div>
+        <p class="eyebrow">UAS · Klasifikasi Citra · CNN</p>
+        <h1>Mendiagnosis penyakit <em>daun</em> dari citra RGB</h1>
+        <p class="lede">Hasil evaluasi model pada PlantVillage — 15 kelas, 20.638 gambar,
+          split terstratifikasi 70/15/15.</p>
+        <ul class="runmeta" id="runmeta"></ul>
+      </div>
+      <div class="lens-wrap">
+        <div class="lens">
+          <svg viewBox="0 0 240 240" aria-hidden="true">
+            <defs>
+              <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#7be495"/>
+                <stop offset="55%" stop-color="#bff0c8"/>
+                <stop offset="100%" stop-color="#f2c46b"/>
+              </linearGradient>
+            </defs>
+            <circle class="track" cx="120" cy="120" r="104"/>
+            <circle class="prog" id="ring" cx="120" cy="120" r="104"
+                    stroke-dasharray="653.45" stroke-dashoffset="653.45"/>
+          </svg>
+          <div class="lens-num" id="heroNum">—<sup>%</sup></div>
+          <div class="lens-cap">akurasi uji</div>
+        </div>
+        <ul class="lens-stats" id="lensStats"></ul>
+      </div>
+    </section>
+
+    <section class="ribbon glass rise" style="--d:.14s" id="ribbon" aria-label="Ringkasan metrik"></section>
+
+    <div class="bento">
+      <article class="panel glass p-curves rise" style="--d:.2s">
+        <div class="panel-head">
+          <h2>Kurva training</h2>
+          <span class="sub" id="curvesSub">—</span>
+          <ul class="legend">
+            <li class="c-train"><i></i>train</li>
+            <li class="c-val"><i></i>validasi</li>
+          </ul>
+        </div>
+        <div class="chart-stack" id="charts"></div>
+      </article>
+
+      <article class="panel glass p-dist rise" style="--d:.26s">
+        <div class="panel-head">
+          <h2>Distribusi dataset</h2>
+          <span class="sub" id="distSub">—</span>
+        </div>
+        <ul class="dist" id="dist"></ul>
+      </article>
+
+      <article class="panel glass p-matrix rise" style="--d:.32s">
+        <div class="panel-head">
+          <h2>Confusion matrix</h2>
+          <span class="sub">aktual ↓ · prediksi →</span>
+        </div>
+        <div id="matrix"></div>
+        <div class="mx-legend"><span>0</span><span class="ramp"></span><span>maks</span></div>
+      </article>
+
+      <article class="panel glass p-classes rise" style="--d:.38s">
+        <div class="panel-head">
+          <h2>Metrik per kelas</h2>
+          <span class="sub" id="clsSub">—</span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="idx" scope="col">#</th>
+                <th scope="col">Kelas</th>
+                <th scope="col">F1</th>
+                <th class="num" scope="col">Presisi</th>
+                <th class="num" scope="col">Recall</th>
+                <th class="num" scope="col">n</th>
+              </tr>
+            </thead>
+            <tbody id="clsBody"></tbody>
+          </table>
+        </div>
+        <div class="samples" id="samples"></div>
+      </article>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <span>PlantVile · TensorFlow 2.21 / Keras 3.15 · data demo sampai run asli dimuat</span>
+    <span id="footSrc">sumber: demo</span>
+  </footer>
+</div>
+
+<noscript>
+  <p style="padding:24px;font-family:system-ui">Dashboard ini butuh JavaScript untuk menggambar grafik.</p>
+</noscript>
+
+<script>
+"use strict";
+
+/* ─────────────────────────────────────────────────────────────
+   Demo data (angka contoh, konsisten dengan dataset PlantVillage
+   yang benar-benar terpasang: 15 kelas / 20.638 gambar).
+   ───────────────────────────────────────────────────────────── */
+const DEMO_COUNTS = {
+  "Pepper__bell___Bacterial_spot":997,
+  "Pepper__bell___healthy":1478,
+  "Potato___Early_blight":1000,
+  "Potato___healthy":152,
+  "Potato___Late_blight":1000,
+  "Tomato_Bacterial_spot":2127,
+  "Tomato_Early_blight":1000,
+  "Tomato_Late_blight":1909,
+  "Tomato_Leaf_Mold":952,
+  "Tomato_Septoria_leaf_spot":1771,
+  "Tomato_Spider_mites_Two_spotted_spider_mite":1676,
+  "Tomato__Target_Spot":1404,
+  "Tomato__Tomato_YellowLeaf__Curl_Virus":3208,
+  "Tomato__Tomato_mosaic_virus":373,
+  "Tomato_healthy":1591
+};
+
+// p, r dipakai apa adanya; f1 = harmonik
+const DEMO_SCORES = [
+  [.958,.946],[.992,.988],[.941,.930],[.881,.822],[.952,.958],
+  [.968,.962],[.893,.901],[.934,.941],[.912,.884],[.944,.951],
+  [.962,.941],[.921,.902],[.984,.991],[.842,.791],[.972,.981]
+];
+
+const DEMO_HISTORY = {
+  loss:            [2.72,1.61,1.12,.86,.70,.58,.49,.42,.36,.31,.27,.24,.21,.19,.17,.16,.15,.14],
+  val_loss:        [2.55,1.55,1.10,.89,.74,.63,.55,.48,.42,.37,.34,.31,.29,.28,.27,.27,.28,.29],
+  accuracy:        [.190,.441,.602,.688,.752,.791,.821,.849,.868,.884,.898,.909,.919,.926,.932,.937,.940,.943],
+  val_accuracy:    [.221,.452,.591,.671,.731,.778,.808,.836,.858,.877,.893,.905,.912,.918,.921,.924,.922,.919]
+};
+
+function demoState(){
+  const names = Object.keys(DEMO_COUNTS);
+  const classes = names.map((name, i) => {
+    const [p, r] = DEMO_SCORES[i];
+    return { name, precision:p, recall:r, f1:2*p*r/(p+r),
+             support:Math.round(DEMO_COUNTS[name]*0.15), total:DEMO_COUNTS[name] };
+  });
+  const acc = 0.9412;
+  return {
+    kind:"demo", label:"demo",
+    classes,
+    history:DEMO_HISTORY,
+    metrics:{ split:"test", samples:classes.reduce((s,c)=>s+c.support,0),
+              accuracy:acc, precision_macro:.9331, recall_macro:.9268,
+              f1_macro:.9267, f1_weighted:.9418 },
+    meta:[["arsitektur","MobileNetV2"],["input","128×128×3"],["batch","32"],
+          ["optimizer","AdamW"],["device","CPU"]],
+    images:{}
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Helpers
+   ───────────────────────────────────────────────────────────── */
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = v => (v*100).toFixed(1);
+const num = (v,d=3) => v==null ? "—" : Number(v).toFixed(d);
+const pretty = n => n.replace(/___/g," · ").replace(/__/g," ").replace(/_/g," ");
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+async function getJSON(path){
+  const res = await fetch(path, {cache:"no-store"});
+  if (!res.ok) throw new Error(path);
+  return res.json();
+}
+const exists = src => new Promise(r => {
+  const img = new Image();
+  img.onload = () => r(true);
+  img.onerror = () => r(false);
+  img.src = src;
+});
+
+/* ─────────────────────────────────────────────────────────────
+   Render
+   ───────────────────────────────────────────────────────────── */
+function render(st){
+  const m = st.metrics || {};
+  const cls = st.classes || [];
+  const acc = m.accuracy ?? 0;
+
+  // hero
+  $("#heroNum").innerHTML = `${pct(acc)}<sup>%</sup>`;
+  const C = 2*Math.PI*104;
+  const ring = $("#ring");
+  ring.setAttribute("stroke-dasharray", C.toFixed(2));
+  requestAnimationFrame(() => {
+    ring.style.transition = "stroke-dashoffset 1.4s cubic-bezier(.2,.9,.2,1)";
+    ring.setAttribute("stroke-dashoffset", (C*(1-acc)).toFixed(2));
+  });
+
+  $("#lensStats").innerHTML = [
+    ["macro F1", num(m.f1_macro)],
+    ["kelas", cls.length || "—"],
+    ["sampel", m.samples ? m.samples.toLocaleString("id-ID") : "—"]
+  ].map(([k,v]) => `<li><dt>${k}</dt><dd>${v}</dd></li>`).join("");
+
+  $("#runmeta").innerHTML = (st.meta || [])
+    .map(([k,v]) => `<li>${esc(k)} <b>${esc(v)}</b></li>`).join("");
+
+  // ribbon
+  $("#ribbon").innerHTML = [
+    ["Macro F1", num(m.f1_macro), ""],
+    ["Presisi macro", num(m.precision_macro), ""],
+    ["Recall macro", num(m.recall_macro), ""],
+    ["F1 weighted", num(m.f1_weighted), ""],
+    ["Sampel uji", m.samples ? m.samples.toLocaleString("id-ID") : "—", `split ${m.split || "—"}`]
+  ].map(([k,v,s]) => `<div class="cell"><span class="k">${k}</span>
+      <div class="v">${v}${s?` <small>${esc(s)}</small>`:""}</div></div>`).join("");
+
+  // curves
+  const h = st.history || {};
+  const nEp = (h.loss || []).length;
+  $("#curvesSub").textContent = nEp ? `${nEp} epoch` : "belum ada history";
+  $("#charts").innerHTML = nEp ? [
+    ["akurasi", [[h.accuracy,"rgba(230,244,234,.40)"],[h.val_accuracy,"#7be495"]], true],
+    ["loss",    [[h.loss,"rgba(230,244,234,.40)"],[h.val_loss,"#f2c46b"]], false]
+  ].map(([label, series, asPct]) => `
+    <div class="chart-row"><span class="lbl">${label}</span>
+      <div class="chart spark">${chartSVG(series, {asPct})}</div></div>`).join("") : "";
+  animatePaths();
+
+  // distribution
+  const sorted = [...cls].sort((a,b) => (b.total||b.support) - (a.total||a.support));
+  const maxCount = Math.max(1, ...sorted.map(c => c.total || c.support));
+  $("#distSub").textContent = `${cls.length} kelas`;
+  $("#dist").innerHTML = sorted.map((c,i) => {
+    const v = c.total || c.support;
+    return `<li title="${esc(c.name)}">
+      <span class="nm">${esc(pretty(c.name))}</span>
+      <span class="n">${v.toLocaleString("id-ID")}</span>
+      <span class="bar"><i style="width:${(v/maxCount*100).toFixed(1)}%;animation-delay:${i*35}ms"></i></span>
+    </li>`;
+  }).join("");
+
+  // per-class
+  $("#clsSub").textContent = `${cls.length} kelas · urut F1`;
+  const byF1 = [...cls].sort((a,b) => b.f1 - a.f1);
+  $("#clsBody").innerHTML = byF1.map(c => {
+    const col = c.f1 >= .95 ? "var(--leaf)" : c.f1 >= .88 ? "var(--amber)" : "var(--rose)";
+    return `<tr>
+      <td class="idx">${String(cls.indexOf(c)+1).padStart(2,"0")}</td>
+      <td class="nm" title="${esc(c.name)}">${esc(pretty(c.name))}</td>
+      <td class="barcell">
+        <div class="f1wrap">
+          <div class="f1bar"><i style="width:${(c.f1*100).toFixed(1)}%;background:${col}"></i></div>
+          <span>${num(c.f1)}</span>
+        </div>
+      </td>
+      <td class="num">${num(c.precision)}</td>
+      <td class="num">${num(c.recall)}</td>
+      <td class="num">${c.support ?? "—"}</td>
+    </tr>`;
+  }).join("");
+
+  // matrix
+  renderMatrix(st);
+
+  // samples image (real runs only)
+  $("#samples").innerHTML = st.images?.samples
+    ? `<img src="${st.images.samples}" alt="Grid contoh prediksi: label asli vs prediksi model">`
+    : "";
+
+  // chrome
+  $("#badge").textContent = st.kind === "demo" ? "Demo" : "Run asli";
+  $("#badge").classList.toggle("live", st.kind !== "demo");
+  $("#footSrc").textContent = `sumber: ${st.kind === "demo" ? "demo" : st.label}`;
+  document.title = `PlantVile · ${st.kind === "demo" ? "Demo" : st.label}`;
+}
+
+function chartSVG(series, {asPct=false} = {}){
+  const W = 720, H = 190, P = {t:14, r:16, b:22, l:40};
+  const vals = series.flatMap(([v]) => v || []).filter(v => typeof v === "number");
+  if (!vals.length) return "";
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = (hi - lo) || 1;
+  lo -= span * .08; hi += span * .08;
+  lo = Math.max(0, lo);              // loss & akurasi tidak pernah negatif
+  if (asPct) hi = Math.min(1, hi);   // akurasi tidak lewat 100%
+  const n = Math.max(...series.map(([v]) => (v||[]).length));
+  const x = i => P.l + (W - P.l - P.r) * (n <= 1 ? 0 : i/(n-1));
+  const y = v => H - P.b - (v - lo)/(hi - lo) * (H - P.t - P.b);
+  const fmt = v => asPct ? (v*100).toFixed(0)+"%" : v.toFixed(2);
+
+  let grid = "";
+  for (let g = 0; g <= 3; g++){
+    const v = lo + (hi - lo) * g/3, yy = y(v);
+    grid += `<line x1="${P.l}" y1="${yy.toFixed(1)}" x2="${W-P.r}" y2="${yy.toFixed(1)}"
+              stroke="rgba(255,255,255,.07)" stroke-width="1"/>
+             <text x="${P.l-8}" y="${(yy+3).toFixed(1)}" text-anchor="end">${fmt(v)}</text>`;
+  }
+
+  let body = "";
+  series.forEach(([data, color], si) => {
+    if (!data || !data.length) return;
+    const d = data.map((v,i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    if (si === series.length - 1){
+      body += `<path class="area" fill="url(#areaGrad)" d="${d} L${x(data.length-1).toFixed(1)},${H-P.b} L${P.l},${H-P.b} Z"/>`;
+    }
+    body += `<path class="line" stroke="${color}" d="${d}"/>`;
+  });
+
+  const last = series[series.length-1][0];
+  const dot = last?.length
+    ? `<circle class="dot" cx="${x(last.length-1).toFixed(1)}" cy="${y(last[last.length-1]).toFixed(1)}"
+         r="3.4" fill="${series[series.length-1][1]}"/>` : "";
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik ${asPct?"akurasi":"loss"} per epoch">
+    <defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(123,228,149,.22)"/>
+      <stop offset="100%" stop-color="rgba(123,228,149,0)"/>
+    </linearGradient></defs>
+    ${grid}${body}${dot}
+    <text x="${P.l}" y="${H-6}">1</text>
+    <text x="${W-P.r}" y="${H-6}" text-anchor="end">${n}</text>
+  </svg>`;
+}
+
+function animatePaths(){
+  document.querySelectorAll(".spark path.line").forEach(p => {
+    const len = p.getTotalLength();
+    p.style.setProperty("--len", len.toFixed(1));
+  });
+}
+
+function renderMatrix(st){
+  const host = $("#matrix");
+  if (st.images?.matrix){
+    host.innerHTML = `<img class="mx-img" src="${st.images.matrix}" alt="Confusion matrix hasil evaluasi">`;
+    return;
+  }
+  const cls = st.classes || [];
+  if (!cls.length){ host.innerHTML = ""; return; }
+
+  const n = cls.length;
+  const mx = st.matrix || demoMatrix(cls);
+  const max = Math.max(1, ...mx.flat());
+
+  const cells = mx.flatMap((row, r) => row.map((v, c) => {
+    const a = v ? .06 + .92 * Math.pow(v/max, .62) : 0;
+    // diagonal (prediksi benar) diberi rim terang, sisanya skala intensitas saja
+    const rim = r === c ? "box-shadow:inset 0 0 0 1px rgba(255,255,255,.32);" : "";
+    return `<i style="background:rgba(123,228,149,${a.toFixed(3)});${rim}" title="aktual ${String(r+1).padStart(2,"0")} → prediksi ${String(c+1).padStart(2,"0")}: ${v}"></i>`;
+  })).join("");
+
+  host.innerHTML = `
+    <div class="matrix">
+      <div class="mx-ylab">${cls.map((_,i)=>`<span>${String(i+1).padStart(2,"0")}</span>`).join("")}</div>
+      <div class="mx-grid" style="grid-template-columns:repeat(${n},1fr);grid-template-rows:repeat(${n},1fr)">${cells}</div>
+      <div></div>
+      <div class="mx-xlab" style="grid-template-columns:repeat(${n},1fr)">
+        ${cls.map((_,i)=>`<span>${String(i+1).padStart(2,"0")}</span>`).join("")}
+      </div>
+    </div>`;
+}
+
+// Matrix contoh: baris = support kelas, diagonal = recall, sisanya disebar
+// ke tetangga terdekat (kelas mirip). Deterministik supaya tidak "berubah".
+function demoMatrix(cls){
+  const rnd = mulberry32(7);
+  const n = cls.length;
+  return cls.map((c, i) => {
+    const row = new Array(n).fill(0);
+    const sup = Math.max(2, c.support || 2);
+    const correct = Math.round(sup * (c.recall || 0));
+    row[i] = correct;
+    let left = sup - correct, guard = 0;
+    while (left > 0 && guard++ < 5000){
+      const off = 1 + Math.floor(rnd() * 3);
+      const j = (i + (rnd() < .5 ? -off : off) + n) % n;
+      row[j]++; left--;
+    }
+    return row;
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Loader: runs/<run>/artifacts  →  state
+   ───────────────────────────────────────────────────────────── */
+async function loadRun(dir){
+  dir = dir.replace(/\/+$/, "");
+  setNotice(false);
+  $("#runPath").value = dir;
+  try {
+    const [names, history, cfg] = await Promise.all([
+      getJSON(dir + "/class_names.json"),
+      getJSON(dir + "/history.json").catch(() => null),
+      getJSON(dir + "/config_used.json").catch(() => null)
+    ]);
+    const metrics = await getJSON(dir + "/test_metrics.json")
+      .catch(() => getJSON(dir + "/val_metrics.json"))
+      .catch(() => null);
+    const per = metrics?.per_class
+      || await getJSON(dir + "/test_per_class.json").catch(() => []);
+
+    const tag = metrics?.split || "test";
+    const [hasMatrix, hasSamples] = await Promise.all([
+      exists(`${dir}/${tag}_confusion_matrix.png`),
+      exists(`${dir}/${tag}_sample_predictions.png`)
+    ]);
+
+    const classes = names.map((name, i) => {
+      const row = per.find(p => p.class === name) || per[i] || {};
+      return { name, precision:row.precision ?? null, recall:row.recall ?? null,
+               f1:row.f1 ?? null, support:row.support ?? null };
+    });
+
+    const mc = cfg?.model || {}, tc = cfg?.train || {}, dc = cfg?.data || {};
+    const state = {
+      kind:"run", label:dir.split("/").pop(),
+      classes,
+      history: history || {},
+      metrics: metrics || {},
+      meta:[["arsitektur", mc.arch || "—"],
+            ["input", `${dc.img_height || "?"}×${dc.img_width || "?"}×${dc.channels || 3}`],
+            ["batch", String(dc.batch_size ?? "—")],
+            ["optimizer", tc.optimizer || "—"],
+            ["device", (await getJSON(dir + "/device.json").catch(() => null))?.device || "—"]],
+      images:{ matrix: hasMatrix ? `${dir}/${tag}_confusion_matrix.png` : null,
+               samples: hasSamples ? `${dir}/${tag}_sample_predictions.png` : null }
+    };
+    render(state);
+  } catch (err) {
+    setNotice(true, `Gagal memuat <code>${esc(dir)}</code> — file artefak tidak ditemukan.`);
+  }
+}
+
+function setNotice(on, html){
+  const el = $("#notice");
+  el.classList.toggle("on", !!on);
+  if (html) el.lastElementChild.innerHTML = html;
+}
+
+async function discoverRuns(){
+  try {
+    const res = await fetch("runs/", {cache:"no-store"});
+    if (!res.ok) return [];
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return [...doc.querySelectorAll("a")]
+      .map(a => a.getAttribute("href"))
+      .filter(h => h && h.endsWith("/") && !h.startsWith(".") && !h.startsWith("/") && !h.includes("?"))
+      .map(h => h.replace(/\/$/, ""));
+  } catch { return []; }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Boot
+   ───────────────────────────────────────────────────────────── */
+(async function boot(){
+  render(demoState());
+
+  // sheen mengikuti pointer
+  document.querySelectorAll(".glass").forEach(el => {
+    el.addEventListener("pointermove", e => {
+      const r = el.getBoundingClientRect();
+      el.style.setProperty("--mx", ((e.clientX - r.left) / r.width * 100).toFixed(1) + "%");
+      el.style.setProperty("--my", ((e.clientY - r.top) / r.height * 100).toFixed(1) + "%");
+    });
+  });
+
+  const runs = await discoverRuns();
+  const sel = $("#runSel");
+  runs.forEach(r => sel.add(new Option(r, "runs/" + r)));
+  sel.addEventListener("change", () => { if (sel.value) loadRun(sel.value); });
+  $("#runPath").addEventListener("keydown", e => {
+    if (e.key === "Enter" && e.target.value.trim()) loadRun(e.target.value.trim());
+  });
+
+  const q = new URLSearchParams(location.search).get("run");
+  if (q) loadRun(q);
+  else if (!runs.length && location.protocol === "file:") setNotice(true);
+})();
+</script>
+</body>
+</html>
