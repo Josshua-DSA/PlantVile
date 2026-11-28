@@ -1,0 +1,1125 @@
+<!doctype html>
+<!--
+  PlantVile - dashboard hasil training CNN (PlantVillage).
+  Satu file, tanpa build step. Buka langsung, atau (disarankan) lewat server
+  supaya folder runs/ bisa dibaca:
+      python -m http.server 8000
+      http://localhost:8000/dashboard.html
+  Tanpa run asli, dashboard memakai angka contoh dan menandainya di halaman.
+  Muat run: pilih dari dropdown, isi path di kotak kanan atas, atau
+  dashboard.html?run=runs/run_20261125_101010
+  Kaca penuh (bukan hanya bar atas + lensa): tambahkan ?glass=full
+-->
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlantVile - Klasifikasi Penyakit Daun</title>
+<meta name="description" content="Dashboard hasil training CNN untuk klasifikasi penyakit daun PlantVillage, 15 kelas.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%238ee6a4'/%3E%3Cpath d='M12 19V9M12 12c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 3-5 7-5 0 3-3 5-7 5Z' fill='none' stroke='%2306100b' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Type and colour are chosen from the subject: a leaf lab at dusk.
+   Fraunces (a serif with soft, organic axes) for display, Instrument Sans
+   for UI, IBM Plex Mono only where digits must line up.
+   Two accents: leaf green for healthy, amber for anything that needs a look. */
+:root{
+  --ink:#06100b;
+  --mist:#e8f2ec;
+  --muted:rgba(232,242,236,.72);
+  --faint:rgba(232,242,236,.56);
+  --leaf:#8ee6a4;
+  --amber:#f0c274;
+  --line:rgba(232,242,236,.11);
+  --sheet:rgba(255,255,255,.026);
+
+  --r:20px;
+  --r-sm:9px;
+
+  --sans:"Instrument Sans","Segoe UI",sans-serif;
+  --serif:"Fraunces",Georgia,serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+
+  --pad:clamp(16px,3.2vw,44px);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;min-height:100vh;overflow-x:hidden;
+  font-family:var(--sans);font-size:15px;line-height:1.55;color:var(--mist);
+  background:var(--ink);
+  -webkit-font-smoothing:antialiased;
+}
+/* one key light and a vignette, not a field of floating orbs */
+body::before{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(115% 78% at 76% -12%,rgba(240,194,116,.09),transparent 60%),
+    radial-gradient(85% 68% at 8% 106%,rgba(30,118,84,.20),transparent 68%),
+    radial-gradient(150% 120% at 50% 40%,transparent 38%,rgba(3,8,6,.55) 100%),
+    linear-gradient(180deg,#08130e 0%,#06100b 58%,#050c09 100%);
+}
+body::after{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.05;
+  mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Real glass, dosed: top bar and the hero lens. Everything else is a thin
+   sheet. html[data-glass="full"] restores blur on the sheets. */
+.glass{
+  position:relative;border:1px solid transparent;border-radius:var(--r);
+  background-image:
+    linear-gradient(rgba(255,255,255,.045),rgba(255,255,255,.03)),
+    linear-gradient(158deg,rgba(255,255,255,.30),rgba(255,255,255,.02) 42%,rgba(255,255,255,.16));
+  background-origin:border-box;background-clip:padding-box,border-box;
+  -webkit-backdrop-filter:blur(28px) saturate(150%);
+  backdrop-filter:blur(28px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.16),
+    0 18px 44px -30px rgba(0,0,0,.9);
+}
+.glass::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(40% 62% at var(--mx,50%) var(--my,0%),
+             rgba(255,255,255,.13),transparent 70%);
+  opacity:0;transition:opacity .4s ease;
+}
+.glass:hover::after{opacity:1}
+
+.sheet{
+  background:var(--sheet);
+  border:1px solid var(--line);
+  border-radius:var(--r);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.055);
+}
+html[data-glass="full"] .sheet{
+  background:rgba(255,255,255,.05);
+  -webkit-backdrop-filter:blur(26px) saturate(150%);
+  backdrop-filter:blur(26px) saturate(150%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 18px 44px -30px rgba(0,0,0,.9);
+}
+
+.shell{position:relative;z-index:2;max-width:1440px;margin:0 auto;padding:0 var(--pad) 64px}
+
+/* top bar */
+.topbar{
+  position:sticky;top:12px;z-index:40;
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  margin:12px 0 clamp(26px,4.4vw,52px);
+  padding:10px 14px 10px 16px;
+}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.mark{width:28px;height:28px;flex:none;border-radius:8px;display:grid;place-items:center;
+  background:var(--leaf)}
+.mark svg{width:15px;height:15px;fill:none;stroke:#06100b;stroke-width:2.1;stroke-linecap:round}
+.brand b{font-family:var(--serif);font-weight:600;font-size:16.5px;letter-spacing:-.01em;display:block;line-height:1.15}
+.brand span{font-size:11px;color:var(--faint);display:block}
+.spacer{flex:1 1 auto}
+
+.pick{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pick label{font-size:11.5px;color:var(--faint)}
+.pick select,.pick input{
+  font:inherit;font-size:13px;color:var(--mist);min-height:44px;
+  background:rgba(255,255,255,.05);
+  border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:0 12px;
+}
+.pick select{appearance:none;padding-right:30px;max-width:220px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 51%,calc(100% - 12px) 51%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.pick input{width:200px}
+.pick input::placeholder{color:var(--faint)}
+select:focus-visible,input:focus-visible,button:focus-visible{
+  outline:2px solid var(--leaf);outline-offset:2px}
+
+/* status: a dot marks a real state, nothing else */
+.state{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
+.state i{width:6px;height:6px;border-radius:50%;background:var(--amber);flex:none}
+.state.live i{background:var(--leaf)}
+
+/* demo banner: the numbers are samples, say so where it is read */
+.banner{
+  display:flex;gap:12px;align-items:flex-start;
+  margin:0 0 28px;padding:12px 0 12px 14px;
+  border-left:2px solid var(--amber);
+  font-size:13px;color:var(--muted);
+}
+.banner[hidden]{display:none}
+.banner code{font-family:var(--mono);font-size:12px;color:rgba(232,242,236,.86)}
+.banner b{color:var(--mist);font-weight:600}
+
+/* hero */
+.hero{
+  display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr);
+  gap:clamp(28px,4vw,60px);align-items:center;
+  margin-bottom:clamp(26px,4vw,48px);
+}
+.eyebrow{margin:0 0 16px;font-size:12px;color:var(--faint)}
+h1{
+  margin:0;font-family:var(--serif);font-weight:400;
+  font-size:clamp(29px,3.7vw,50px);line-height:1.08;letter-spacing:-.022em;
+  font-variation-settings:"SOFT" 20;
+  text-wrap:balance;
+}
+h1 em{font-style:italic;font-weight:500;color:var(--leaf);font-variation-settings:"SOFT" 60,"WONK" 1}
+.lede{margin:15px 0 0;max-width:44ch;color:var(--muted);font-size:14.5px}
+
+.runmeta{display:flex;flex-wrap:wrap;gap:7px;margin:22px 0 0;padding:0;list-style:none}
+.runmeta li{
+  font-size:11.5px;padding:6px 10px;border-radius:var(--r-sm);
+  border:1px solid var(--line);color:var(--muted);
+}
+.runmeta b{color:var(--mist);font-weight:500;font-family:var(--mono);font-size:11px}
+
+/* the lens: the one surface that really refracts */
+.lens-wrap{display:flex;flex-direction:column;align-items:center;gap:18px}
+.lens{
+  position:relative;width:min(292px,60vw);aspect-ratio:1;border-radius:50%;
+  display:grid;place-items:center;
+  -webkit-backdrop-filter:blur(38px) saturate(190%) brightness(1.06);
+  backdrop-filter:blur(38px) saturate(190%) brightness(1.06);
+  background:radial-gradient(circle at 32% 26%,rgba(255,255,255,.15),rgba(255,255,255,.02) 60%,rgba(255,255,255,.05));
+  box-shadow:
+    inset 0 2px 1px rgba(255,255,255,.38),
+    inset 0 -12px 26px -12px rgba(0,0,0,.45),
+    0 0 0 1px rgba(255,255,255,.16),
+    0 0 0 6px rgba(255,255,255,.022),
+    0 30px 70px -46px rgba(0,0,0,.9),
+    -2px 0 14px -9px rgba(120,220,255,.28),
+     2px 0 14px -9px rgba(240,194,116,.26);
+}
+.lens svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.lens .track{fill:none;stroke:rgba(255,255,255,.09);stroke-width:6}
+.lens .prog{fill:none;stroke:url(#ringGrad);stroke-width:6;stroke-linecap:round}
+.lens-num{
+  position:relative;font-family:var(--serif);font-weight:500;
+  font-size:clamp(42px,7vw,62px);line-height:1;
+  letter-spacing:-.035em;font-variant-numeric:tabular-nums;
+  font-variation-settings:"SOFT" 40,"WONK" 1;
+}
+.lens-num sup{font-size:.36em;font-weight:400;vertical-align:super;color:var(--leaf)}
+.lens-cap{position:absolute;bottom:21%;font-size:11px;color:var(--faint)}
+.lens-stats{display:flex;gap:26px;margin:0;padding:0;list-style:none;text-align:center}
+.lens-stats dt{font-size:10.5px;color:var(--faint)}
+.lens-stats dd{margin:2px 0 0;font-family:var(--serif);font-size:19px;font-weight:500;
+  font-variant-numeric:tabular-nums}
+
+/* metric row: ruled, not a row of cards */
+.ribbon{
+  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));
+  border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  margin-bottom:clamp(18px,2.6vw,26px);
+}
+.ribbon .cell{padding:17px 20px;border-left:1px solid var(--line)}
+.ribbon .cell:first-child{border-left:0}
+.ribbon .k{display:block;font-size:11.5px;color:var(--faint);margin-bottom:3px}
+.ribbon .v{font-family:var(--serif);font-size:23px;font-weight:500;
+  font-variant-numeric:tabular-nums;letter-spacing:-.015em}
+.ribbon .v small{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--faint);letter-spacing:0}
+
+/* sections */
+.grid{
+  display:grid;gap:clamp(14px,1.5vw,18px);
+  grid-template-columns:repeat(12,minmax(0,1fr));
+  grid-template-areas:
+    "curves curves curves curves curves curves curves curves dist dist dist dist"
+    "matrix matrix matrix matrix matrix classes classes classes classes classes classes classes"
+    "samples samples samples samples samples samples samples samples samples samples samples samples";
+}
+.panel{padding:20px 22px 18px;min-width:0}
+.p-curves{grid-area:curves}
+.p-dist{grid-area:dist}
+.p-matrix{grid-area:matrix;align-self:start}
+.p-classes{grid-area:classes}
+.p-samples{grid-area:samples}
+.p-samples[hidden]{display:none}
+
+/* Sumber deliverable (results/artifacts) tidak punya history, per-class, atau
+   matriks, jadi panelnya diganti dua panel lebar alih-alih dibiarkan kosong. */
+.p-bench[hidden],.p-info[hidden]{display:none}
+.grid.bench-mode{display:flex;flex-direction:column;gap:clamp(14px,1.5vw,18px)}
+.bench-wrap{overflow-x:auto;margin:0 -6px;padding:0 6px;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.bench-wrap table{min-width:660px}
+tbody td.fmt{font-family:var(--mono);font-size:11px;color:var(--muted)}
+tbody tr.bad td{background:rgba(240,194,116,.055)}
+td.num.bad{color:var(--amber)}
+.info-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:0;margin:0;border-top:1px solid var(--line)}
+.info-list>div{padding:12px 18px 13px 0;border-bottom:1px solid var(--line);min-width:0}
+.info-list dt{font-size:11px;color:var(--faint);margin-bottom:3px}
+.info-list dd{margin:0;font-size:12.5px;line-height:1.45;color:rgba(232,242,236,.9);
+  overflow-wrap:anywhere}
+.info-list dd.mono{font-family:var(--mono);font-size:11.5px}
+
+.head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.head h2{margin:0;font-size:13.5px;font-weight:600}
+.head .sub{font-size:11.5px;color:var(--faint)}
+.head .sub.n{font-family:var(--mono);font-size:11px}
+.legend{display:flex;gap:14px;margin-left:auto;list-style:none;margin-block:0;padding:0}
+.legend li{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.legend i{width:15px;height:2px;border-radius:2px;background:currentColor}
+.legend .c-train{color:rgba(232,242,236,.52)}
+.legend .c-val{color:var(--leaf)}
+
+/* charts */
+.charts{display:flex;flex-direction:column;gap:6px}
+.chart-row{display:flex;align-items:baseline;gap:10px}
+.chart-row .lbl{font-size:11px;color:var(--faint);width:52px;flex:none;padding-top:5px}
+.chart{flex:1;min-width:0}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart text{font-family:var(--mono);font-size:8.5px;fill:rgba(232,242,236,.52)}
+.spark .line{fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;
+  stroke-dasharray:var(--len,0);stroke-dashoffset:var(--len,0);
+  animation:draw 1.3s cubic-bezier(.22,.9,.2,1) forwards}
+.spark .area{opacity:0;animation:fade .9s ease .5s forwards}
+.spark .dot{opacity:0;animation:fade .5s ease 1.15s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+@keyframes fade{to{opacity:1}}
+
+/* class sizes */
+.dist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.dist li{display:grid;grid-template-columns:1fr auto;gap:3px 10px;font-size:11.5px}
+.dist .nm{color:rgba(232,242,236,.84);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dist .n{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.dist .bar{grid-column:1/-1;height:3px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden}
+.dist .bar i{display:block;height:100%;border-radius:99px;background:var(--leaf);opacity:.75;
+  transform-origin:left;animation:grow .9s cubic-bezier(.2,.9,.2,1) both}
+@keyframes grow{from{transform:scaleX(0)}}
+.note{margin:14px 0 0;font-size:11.5px;line-height:1.5;color:var(--faint);
+  padding-top:12px;border-top:1px solid var(--line)}
+.note b{color:var(--muted);font-weight:500}
+
+/* per-class table */
+.tbl-wrap{max-height:348px;overflow:auto;margin:0 -6px;padding:0 6px;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.tbl-wrap::-webkit-scrollbar{width:8px}
+.tbl-wrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:99px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead th{
+  position:sticky;top:0;z-index:1;text-align:left;
+  font-size:11px;font-weight:500;color:var(--faint);
+  padding:0 8px 8px;background:#081310;
+}
+thead th.num,tbody td.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody td{padding:7px 8px;border-top:1px solid rgba(232,242,236,.07)}
+tbody tr:hover td{background:rgba(255,255,255,.035)}
+td.idx,th.idx{width:26px;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+td.nm{max-width:230px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:rgba(232,242,236,.92)}
+td.num{font-family:var(--mono);font-size:11px;color:rgba(232,242,236,.8)}
+td.barcell{width:32%}
+.f1wrap{display:flex;align-items:center;gap:10px}
+.f1bar{position:relative;flex:1;height:5px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden}
+.f1bar i{position:absolute;inset:0 auto 0 0;border-radius:99px;transform-origin:left;
+  animation:grow .8s cubic-bezier(.2,.9,.2,1) both}
+.f1wrap span{font-family:var(--mono);font-size:10.5px;color:rgba(232,242,236,.84);
+  font-variant-numeric:tabular-nums;width:38px;text-align:right;flex:none}
+
+/* confusion matrix */
+.matrix{display:grid;grid-template-columns:20px 1fr;grid-template-rows:1fr 20px;gap:6px}
+.mx-grid{display:grid;gap:2px;aspect-ratio:1}
+.mx-grid i{display:block;border-radius:2px;background:rgba(142,230,164,0);
+  transition:transform .15s ease,filter .15s ease}
+.mx-grid i:hover,.mx-grid i:focus-visible{transform:scale(1.5);filter:brightness(1.5);
+  z-index:2;position:relative;outline:none}
+.mx-ylab,.mx-xlab{display:grid;gap:2px;font-family:var(--mono);font-size:8px;color:var(--faint)}
+.mx-ylab{align-content:center;justify-items:end}
+.mx-xlab{align-content:start}
+.mx-ylab span,.mx-xlab span{display:grid;place-items:center;line-height:1}
+.mx-xlab span{writing-mode:vertical-rl}
+.mx-img{width:100%;border-radius:var(--r-sm);display:block}
+.mx-legend{display:flex;align-items:center;gap:8px;margin-top:12px;
+  font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.mx-legend .ramp{flex:1;height:4px;border-radius:99px;
+  background:linear-gradient(90deg,rgba(142,230,164,.06),rgba(142,230,164,.95))}
+
+.p-samples img{width:100%;border-radius:var(--r-sm);display:block;border:1px solid var(--line)}
+
+.foot{
+  margin-top:clamp(26px,4vw,40px);padding-top:18px;
+  border-top:1px solid var(--line);
+  display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;
+  font-size:11.5px;color:var(--faint);
+}
+.foot a{color:rgba(232,242,236,.84);text-decoration:none;border-bottom:1px solid var(--line)}
+.foot a:hover{color:var(--leaf);border-color:var(--leaf)}
+
+.rise{animation:rise .75s cubic-bezier(.2,.85,.2,1) both;animation-delay:var(--d,0s)}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}}
+
+/* three states: phone, tablet/small laptop, desktop */
+@media (max-width:1180px){
+  .grid{grid-template-columns:repeat(6,minmax(0,1fr));grid-template-areas:
+    "curves curves curves curves curves curves"
+    "dist dist dist matrix matrix matrix"
+    "classes classes classes classes classes classes"
+    "samples samples samples samples samples samples"}
+  .hero{grid-template-columns:1fr;gap:32px}
+  .lens-wrap{flex-direction:row;justify-content:flex-start;gap:30px;align-items:center}
+  .ribbon{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .ribbon .cell:nth-child(4){border-left:0}
+  .ribbon .cell:nth-child(4),.ribbon .cell:nth-child(5){border-top:1px solid var(--line)}
+}
+@media (max-width:760px){
+  .topbar{border-radius:16px;padding:10px 12px}
+  .pick{width:100%}
+  .pick input{width:100%;flex:1 1 140px}
+  .pick select{max-width:none;flex:1 1 160px}
+  .ribbon{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ribbon .cell{padding:13px 14px}
+  .ribbon .cell:nth-child(odd){border-left:0;padding-left:0}
+  .ribbon .cell:nth-child(n+3){border-top:1px solid var(--line)}
+  .grid{grid-template-columns:1fr;grid-template-areas:"curves" "dist" "matrix" "classes" "samples"}
+  .lens-wrap{flex-direction:column;align-items:flex-start}
+  .lens-stats{gap:20px}
+  .panel{padding:16px 14px 14px}
+  td.barcell{display:none}
+  td.nm{max-width:none;white-space:normal;line-height:1.35}
+  .chart-row .lbl{width:44px;font-size:10.5px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .spark .line{stroke-dasharray:none;stroke-dashoffset:0}
+  .spark .area,.spark .dot{opacity:1}
+  .glass::after{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <header class="topbar glass">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 21V9"/><path d="M12 12C12 7 8 4 4 4c0 5 4 8 8 8Z"/><path d="M12 15c0-4 3.6-6 8-6 0 4-3.6 6-8 6Z"/></svg>
+      </span>
+      <div>
+        <b>PlantVile</b>
+        <span>Neuro Computing</span>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="pick">
+      <label for="runSel">Run</label>
+      <select id="runSel" aria-label="Pilih hasil training"><option value="">Angka contoh</option></select>
+      <input id="runPath" type="text" spellcheck="false" placeholder="runs/run_..." aria-label="Path folder run">
+      <span class="state" id="state"><i></i><span>Demo</span></span>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" role="status">
+    <span>
+      <b>Angka di halaman ini contoh, bukan hasil training.</b>
+      Jalankan <code>python -m http.server 8000</code> di folder PlantVile, buka
+      <code>http://localhost:8000/dashboard.html</code>, lalu pilih run dari daftar.
+    </span>
+  </div>
+
+  <main>
+    <section class="hero rise" style="--d:.04s">
+      <div>
+        <p class="eyebrow">UAS Neuro Computing · klasifikasi citra</p>
+        <h1>Mendiagnosis penyakit <em>daun</em> dari citra RGB</h1>
+        <p class="lede" id="lede"></p>
+        <ul class="runmeta" id="runmeta"></ul>
+      </div>
+      <div class="lens-wrap">
+        <div class="lens">
+          <svg viewBox="0 0 240 240" aria-hidden="true">
+            <defs>
+              <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#8ee6a4"/>
+                <stop offset="60%" stop-color="#cdf3d6"/>
+                <stop offset="100%" stop-color="#f0c274"/>
+              </linearGradient>
+            </defs>
+            <circle class="track" cx="120" cy="120" r="104"/>
+            <circle class="prog" id="ring" cx="120" cy="120" r="104"
+                    stroke-dasharray="653.45" stroke-dashoffset="653.45"/>
+          </svg>
+          <div class="lens-num" id="heroNum">0<sup>%</sup></div>
+          <div class="lens-cap">akurasi uji</div>
+        </div>
+        <ul class="lens-stats" id="lensStats"></ul>
+      </div>
+    </section>
+
+    <section class="ribbon rise" style="--d:.12s" id="ribbon" aria-label="Ringkasan metrik"></section>
+
+    <div class="grid">
+      <article class="panel sheet p-curves rise" style="--d:.18s">
+        <div class="head">
+          <h2>Konvergensi training</h2>
+          <span class="sub n" id="curvesSub"></span>
+          <ul class="legend">
+            <li class="c-train"><i></i>train</li>
+            <li class="c-val"><i></i>validasi</li>
+          </ul>
+        </div>
+        <div class="charts" id="charts"></div>
+      </article>
+
+      <article class="panel sheet p-dist rise" style="--d:.24s">
+        <div class="head">
+          <h2 id="distTitle">Ukuran tiap kelas</h2>
+          <span class="sub n" id="distSub"></span>
+        </div>
+        <ul class="dist" id="dist"></ul>
+        <p class="note" id="distNote"></p>
+      </article>
+
+      <article class="panel sheet p-matrix rise" style="--d:.3s">
+        <div class="head">
+          <h2>Confusion matrix</h2>
+          <span class="sub" id="mxSub"></span>
+        </div>
+        <div id="matrix"></div>
+        <div class="mx-legend"><span>0</span><span class="ramp"></span><span id="mxMax">maks</span></div>
+      </article>
+
+      <article class="panel sheet p-classes rise" style="--d:.36s">
+        <div class="head">
+          <h2>Metrik per kelas</h2>
+          <span class="sub n" id="clsSub"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="idx" scope="col">#</th>
+                <th scope="col">Kelas</th>
+                <th scope="col">F1</th>
+                <th class="num" scope="col">Presisi</th>
+                <th class="num" scope="col">Recall</th>
+                <th class="num" scope="col">n</th>
+              </tr>
+            </thead>
+            <tbody id="clsBody"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel sheet p-samples rise" style="--d:.42s" id="samplesPanel" hidden>
+        <div class="head">
+          <h2>Contoh prediksi</h2>
+          <span class="sub">label asli, prediksi, dan keyakinan model</span>
+        </div>
+        <div id="samples"></div>
+      </article>
+
+      <article class="panel sheet p-bench rise" style="--d:.18s" id="benchPanel" hidden>
+        <div class="head">
+          <h2>Benchmark format model</h2>
+          <span class="sub n" id="benchSub"></span>
+        </div>
+        <div class="bench-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Format</th>
+                <th class="num" scope="col">Ukuran</th>
+                <th class="num" scope="col">p50 ms</th>
+                <th class="num" scope="col">p95 ms</th>
+                <th class="num" scope="col">Akurasi</th>
+                <th class="num" scope="col">F1 macro</th>
+                <th class="num" scope="col">&Delta; F1</th>
+                <th class="num" scope="col">Recall terendah</th>
+              </tr>
+            </thead>
+            <tbody id="benchBody"></tbody>
+          </table>
+        </div>
+        <p class="note" id="benchNote"></p>
+      </article>
+
+      <article class="panel sheet p-info rise" style="--d:.24s" id="infoPanel" hidden>
+        <div class="head">
+          <h2>Kartu model</h2>
+          <span class="sub">results/artifacts/model_metadata.json</span>
+        </div>
+        <dl class="info-list" id="infoList"></dl>
+      </article>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <span>PlantVile · TensorFlow 2.21 / Keras 3.15</span>
+    <span id="footSrc">sumber: angka contoh</span>
+  </footer>
+</div>
+
+<noscript>
+  <p style="padding:24px;font-family:system-ui">Dashboard ini butuh JavaScript untuk menggambar grafik.</p>
+</noscript>
+
+<script>
+"use strict";
+
+/* Angka contoh. Jumlah gambar per kelas di bawah ini nyata, diambil dari
+   dataset PlantVillage yang terpasang (20.638 gambar). Skor dan kurva adalah
+   contoh sampai ada run asli di runs/. */
+const DEMO_COUNTS = {
+  "Pepper__bell___Bacterial_spot":997,
+  "Pepper__bell___healthy":1478,
+  "Potato___Early_blight":1000,
+  "Potato___healthy":152,
+  "Potato___Late_blight":1000,
+  "Tomato_Bacterial_spot":2127,
+  "Tomato_Early_blight":1000,
+  "Tomato_Late_blight":1909,
+  "Tomato_Leaf_Mold":952,
+  "Tomato_Septoria_leaf_spot":1771,
+  "Tomato_Spider_mites_Two_spotted_spider_mite":1676,
+  "Tomato__Target_Spot":1404,
+  "Tomato__Tomato_YellowLeaf__Curl_Virus":3208,
+  "Tomato__Tomato_mosaic_virus":373,
+  "Tomato_healthy":1591
+};
+
+const DEMO_SCORES = [
+  [.958,.946],[.992,.988],[.941,.930],[.881,.822],[.952,.958],
+  [.968,.962],[.893,.901],[.934,.941],[.912,.884],[.944,.951],
+  [.962,.941],[.921,.902],[.984,.991],[.842,.791],[.972,.981]
+];
+
+const DEMO_HISTORY = {
+  loss:         [2.72,1.61,1.12,.86,.70,.58,.49,.42,.36,.31,.27,.24,.21,.19,.17,.16,.15,.14],
+  val_loss:     [2.55,1.55,1.10,.89,.74,.63,.55,.48,.42,.37,.34,.31,.29,.28,.27,.27,.28,.29],
+  accuracy:     [.190,.441,.602,.688,.752,.791,.821,.849,.868,.884,.898,.909,.919,.926,.932,.937,.940,.943],
+  val_accuracy: [.221,.452,.591,.671,.731,.778,.808,.836,.858,.877,.893,.905,.912,.918,.921,.924,.922,.919]
+};
+
+function demoState(){
+  const names = Object.keys(DEMO_COUNTS);
+  const classes = names.map((name, i) => {
+    const [p, r] = DEMO_SCORES[i];
+    return { name, precision:p, recall:r, f1:2*p*r/(p+r),
+             support:Math.round(DEMO_COUNTS[name]*0.15), total:DEMO_COUNTS[name] };
+  });
+  return {
+    kind:"demo", label:"angka contoh",
+    classes,
+    lede:"Angka contoh. Dataset PlantVillage: 15 kelas, 20.638 gambar, split terstratifikasi 70/15/15.",
+    distTitle:"Ukuran tiap kelas", distUnit:"gambar", classWeight:"balanced",
+    history:DEMO_HISTORY,
+    metrics:{ split:"test", samples:classes.reduce((s,c)=>s+c.support,0),
+              accuracy:.9412, precision_macro:.9331, recall_macro:.9268,
+              f1_macro:.9267, f1_weighted:.9418 },
+    meta:[["MobileNetV2","arsitektur"],["128 × 128 × 3","input"],["32","batch"],
+          ["AdamW","optimizer"],["CPU","device"]],
+    images:{}
+  };
+}
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = v => (v*100).toFixed(1);
+const num = (v,d=3) => v == null ? "–" : Number(v).toFixed(d);
+const pretty = n => n.replace(/___/g," / ").replace(/__/g," ").replace(/_/g," ");
+const isDemo = () => state.kind === "demo";
+
+/* Hasil deliverable tim: metadata ringan yang ikut ter-commit di
+   results/artifacts, jadi tetap ada walau folder runs/ tidak dibawa. */
+const KAGGLE_PATH = "results/artifacts/model_metadata.json";
+const FORMAT_ORDER = ["keras_fp32","tflite_fp32","tflite_fp16","tflite_int8"];
+const fmtLabel = f => f.startsWith("tflite_")
+  ? "TFLite " + f.slice(7)
+  : "Keras " + f.slice(6);
+
+async function kaggleState(){
+  const d = await getJSON(KAGGLE_PATH);
+  const models = d.models || {};
+  const names = Object.keys(models);
+  if (!names.length) throw new Error("metadata kosong");
+
+  const webName = models[d.recommended_web_model] ? d.recommended_web_model : names[0];
+  const web = models[webName];
+  const base = web.benchmarks.find(b => b.format === "keras_fp32") || web.benchmarks[0];
+  // angka latensi dan ukuran harus dari baris TFLite, bukan Keras
+  const tflite = web.benchmarks.find(b => b.format === "tflite_fp32") || base;
+
+  // model rekomendasi dulu, lalu sisanya; tiap model urut fp32 ke int8
+  const ordered = [webName, ...names.filter(n => n !== webName)];
+  const bench = ordered.flatMap(name => {
+    const m = models[name];
+    const rows = (m.benchmarks || []).map(b => ({ ...b, model: name, arch: m.arch }));
+    return rows.sort((a,b) => FORMAT_ORDER.indexOf(a.format) - FORMAT_ORDER.indexOf(b.format));
+  });
+
+  return {
+    kind:"kaggle",
+    label:"hasil deliverable · " + web.arch,
+    numClasses:d.num_classes || 15,
+    classes:[],
+    bench, web, meta0:d,
+    lede:[
+      `${d.num_classes} kelas`,
+      `${base.samples.toLocaleString("id-ID")} sampel uji`,
+      `${web.arch} fine-tuned ${web.input_shape.slice(1).join(" × ")}`,
+      `TFLite fp32 ${tflite.p50_ms.toFixed(1)} ms/citra`
+    ].join(" · "),
+    ribbon:[
+      ["Macro F1", num(base.f1_macro), ""],
+      ["Akurasi", pct(base.accuracy) + "%",
+       `CI95 ${num(base.acc_ci95?.[0],4)}–${num(base.acc_ci95?.[1],4)}`],
+      ["Recall terendah", num(base.worst_class_recall), "kelas terburuk"],
+      ["Kalibrasi ECE", num(web.val_ece_before,3), `setelah suhu ${num(web.val_ece_after_oof,3)}`],
+      ["Sampel uji", base.samples.toLocaleString("id-ID"), `split ${base.eval_split}`]
+    ],
+    history:{},
+    metrics:{ split:base.eval_split, samples:base.samples, accuracy:base.accuracy,
+              precision_macro:base.precision_macro, recall_macro:base.recall_macro,
+              f1_macro:base.f1_macro },
+    meta:[
+      [web.arch, "arsitektur"],
+      [web.input_shape.slice(1).join(" × "), "input"],
+      [tflite.size_mb.toFixed(1) + " MB", "TFLite fp32"],
+      [tflite.p50_ms.toFixed(1) + " ms", "p50 TFLite fp32"],
+      ["T = " + Number(web.temperature_T).toFixed(3), "kalibrasi suhu"]
+    ],
+    info:[
+      ["Model web", d.recommended_web_model],
+      ["Model mobile", `${d.recommended_mobile_model} · ${d.recommended_mobile_quant}`],
+      ["Arsitektur", web.arch],
+      ["Input", `${web.input_shape.slice(1).join(" × ")}, ${web.input_dtype}`],
+      ["Preprocessing", web.preprocessing],
+      ["Suhu kalibrasi T", Number(web.temperature_T).toFixed(5), true],
+      ["ECE validasi", `${num(web.val_ece_before,4)} sebelum, ${num(web.val_ece_after_oof,4)} setelah temperature scaling`],
+      ["Ambang keyakinan rendah", String(d.low_confidence_threshold), true],
+      ["Split evaluasi", String(d.eval_split), true]
+    ],
+    images:{}
+  };
+}
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+async function getJSON(path){
+  const res = await fetch(path, {cache:"no-store"});
+  if (!res.ok) throw new Error(path);
+  return res.json();
+}
+const exists = src => new Promise(r => {
+  const img = new Image();
+  img.onload = () => r(true);
+  img.onerror = () => r(false);
+  img.src = src;
+});
+
+let state = demoState();
+
+function render(st){
+  state = st;
+  const m = st.metrics || {};
+  const cls = st.classes || [];
+  const acc = m.accuracy ?? 0;
+  const benchMode = st.kind === "kaggle";
+
+  $(".grid").classList.toggle("bench-mode", benchMode);
+  $("#benchPanel").hidden = !benchMode;
+  $("#infoPanel").hidden = !benchMode;
+  $("#banner").hidden = st.kind !== "demo";
+  $("#state").classList.toggle("live", st.kind !== "demo");
+  $("#state").lastElementChild.textContent =
+    st.kind === "demo" ? "Demo" : benchMode ? "Deliverable" : "Run asli";
+  $("#footSrc").textContent = "sumber: " + (st.kind === "demo" ? "angka contoh" : st.label);
+  document.title = "PlantVile · " + (st.kind === "demo" ? "angka contoh" : st.label);
+
+  $("#lede").innerHTML = esc(st.lede || "");
+  $("#distTitle").textContent = st.distTitle || "Ukuran tiap kelas";
+  $("#heroNum").innerHTML = `${pct(acc)}<sup>%</sup>`;
+  const C = 2*Math.PI*104, ring = $("#ring");
+  ring.setAttribute("stroke-dasharray", C.toFixed(2));
+  requestAnimationFrame(() => {
+    ring.style.transition = "stroke-dashoffset 1.3s cubic-bezier(.2,.9,.2,1)";
+    ring.setAttribute("stroke-dashoffset", (C*(1-acc)).toFixed(2));
+  });
+
+  $("#lensStats").innerHTML = [
+    ["macro F1", num(m.f1_macro)],
+    ["kelas", cls.length || st.numClasses || "–"],
+    ["sampel uji", m.samples ? m.samples.toLocaleString("id-ID") : "–"]
+  ].map(([k,v]) => `<li><dt>${k}</dt><dd>${v}</dd></li>`).join("");
+
+  $("#runmeta").innerHTML = (st.meta || [])
+    .map(([v,k]) => `<li>${esc(k)} <b>${esc(v)}</b></li>`).join("");
+
+  $("#ribbon").innerHTML = (st.ribbon || [
+    ["Macro F1", num(m.f1_macro), ""],
+    ["Presisi macro", num(m.precision_macro), ""],
+    ["Recall macro", num(m.recall_macro), ""],
+    ["F1 weighted", num(m.f1_weighted), ""],
+    ["Sampel uji", m.samples ? m.samples.toLocaleString("id-ID") : "–", `split ${m.split || "–"}`]
+  ]).map(([k,v,s]) => `<div class="cell"><span class="k">${k}</span>
+      <div class="v">${v}${s?` <small>${esc(s)}</small>`:""}</div></div>`).join("");
+
+  // charts, with the one number worth reading off them
+  const h = st.history || {};
+  const va = h.val_accuracy || h.accuracy || [];
+  const nEp = (h.loss || []).length;
+  let bestV = -1, bestEp = 0;
+  va.forEach((v,i) => { if (v > bestV){ bestV = v; bestEp = i+1; } });
+  $("#curvesSub").textContent = nEp
+    ? `${nEp} epoch · val terbaik ${bestV.toFixed(3)} di epoch ${bestEp}`
+    : "belum ada history";
+  $("#charts").innerHTML = nEp ? [
+    ["akurasi", [[h.accuracy,"rgba(232,242,236,.5)"],[h.val_accuracy,"#8ee6a4"]], true],
+    ["loss",    [[h.loss,"rgba(232,242,236,.5)"],[h.val_loss,"#f0c274"]], false]
+  ].map(([label, series, asPct], i) => `
+    <div class="chart-row"><span class="lbl">${label}</span>
+      <div class="chart spark">${chartSVG(series, {asPct, id:"areaGrad" + i})}</div></div>`).join("") : "";
+  animatePaths();
+
+  // class sizes + the imbalance that motivates class_weight
+  const sorted = [...cls].sort((a,b) => (b.total||b.support) - (a.total||a.support));
+  const counts = sorted.map(c => c.total || c.support || 0);
+  const maxCount = Math.max(1, ...counts), minCount = Math.min(...counts.filter(Boolean));
+  const totalAll = counts.reduce((s,v) => s+v, 0);
+  $("#distSub").textContent =
+    `${totalAll.toLocaleString("id-ID")} ${st.distUnit || "gambar"} · ${cls.length} kelas`;
+  $("#dist").innerHTML = sorted.map((c,i) => {
+    const v = c.total || c.support;
+    return `<li title="${esc(c.name)}">
+      <span class="nm">${esc(pretty(c.name))}</span>
+      <span class="n">${v.toLocaleString("id-ID")}</span>
+      <span class="bar"><i style="width:${(v/maxCount*100).toFixed(1)}%;animation-delay:${i*30}ms"></i></span>
+    </li>`;
+  }).join("");
+  $("#distNote").innerHTML = Number.isFinite(minCount) && minCount > 0
+    ? `Kelas terbesar <b>${(maxCount/minCount).toFixed(0)}×</b> kelas terkecil
+       (${maxCount.toLocaleString("id-ID")} vs ${minCount.toLocaleString("id-ID")}),
+       jadi <b>class_weight=${esc(st.classWeight || "balanced")}</b> dipakai.`
+    : "";
+
+  // per-class, sorted by F1
+  $("#clsSub").textContent = m.samples
+    ? `${cls.length} kelas · n = ${m.samples.toLocaleString("id-ID")}`
+    : `${cls.length} kelas`;
+  const byF1 = [...cls].sort((a,b) => b.f1 - a.f1);
+  $("#clsBody").innerHTML = byF1.map(c => {
+    const col = c.f1 >= .95 ? "var(--leaf)" : "var(--amber)";
+    return `<tr>
+      <td class="idx">${String(cls.indexOf(c)+1).padStart(2,"0")}</td>
+      <td class="nm" title="${esc(c.name)}">${esc(pretty(c.name))}</td>
+      <td class="barcell">
+        <div class="f1wrap">
+          <div class="f1bar"><i style="width:${(c.f1*100).toFixed(1)}%;background:${col}"></i></div>
+          <span>${num(c.f1)}</span>
+        </div>
+      </td>
+      <td class="num">${num(c.precision)}</td>
+      <td class="num">${num(c.recall)}</td>
+      <td class="num">${c.support ?? "–"}</td>
+    </tr>`;
+  }).join("");
+
+  renderMatrix(st);
+
+  $("#samples").innerHTML = st.images?.samples
+    ? `<img src="${st.images.samples}" alt="Grid contoh prediksi: label asli dan prediksi model">`
+    : "";
+  $("#samplesPanel").hidden = !st.images?.samples;
+
+  if (benchMode){ renderBench(st); renderInfo(st); }
+}
+
+function renderBench(st){
+  const rows = st.bench || [];
+  const samples = st.metrics?.samples;
+  $("#benchSub").textContent = rows.length
+    ? `${rows.length} konfigurasi · split ${st.metrics?.split || "test"}` +
+      (samples ? ` · ${samples.toLocaleString("id-ID")} sampel` : "")
+    : "";
+  $("#benchBody").innerHTML = rows.map(b => {
+    const drop = Number(b.delta_f1_vs_fp32 || 0);
+    const bad = drop < -0.05;
+    const delta = drop === 0 ? "–" : (drop > 0 ? "+" : "") + drop.toFixed(3);
+    return `<tr class="${bad ? "bad" : ""}">
+      <td class="nm">${esc(b.arch)}</td>
+      <td class="fmt">${esc(fmtLabel(b.format))}</td>
+      <td class="num">${Number(b.size_mb).toFixed(1)} MB</td>
+      <td class="num">${Number(b.p50_ms).toFixed(1)}</td>
+      <td class="num">${Number(b.p95_ms).toFixed(1)}</td>
+      <td class="num">${num(b.accuracy)}</td>
+      <td class="num">${num(b.f1_macro)}</td>
+      <td class="num${bad ? " bad" : ""}">${delta}</td>
+      <td class="num">${num(b.worst_class_recall)}</td>
+    </tr>`;
+  }).join("");
+  $("#benchNote").innerHTML = benchNote(st);
+}
+
+/* Kalimatnya dihitung dari data, bukan ditulis tangan, supaya tetap benar
+   kalau metadata-nya diperbarui tim. */
+function benchNote(st){
+  const rows = st.bench || [];
+  const int8 = rows.filter(r => r.format === "tflite_int8");
+  if (!int8.length) return "";
+  const worst = [...int8].sort((a,b) => a.delta_f1_vs_fp32 - b.delta_f1_vs_fp32)[0];
+  const best  = [...int8].sort((a,b) => b.delta_f1_vs_fp32 - a.delta_f1_vs_fp32)[0];
+  const base = rows.find(r => r.model === worst.model && r.format === "keras_fp32") || {};
+  const d = st.meta0 || {};
+  return `INT8 paling merugikan <b>${esc(worst.arch)}</b>: F1 turun
+    <b>${Math.abs(worst.delta_f1_vs_fp32).toFixed(3)}</b>
+    (${num(base.f1_macro)} ke ${num(worst.f1_macro)}), sementara
+    <b>${esc(best.arch)}</b> cuma turun ${Math.abs(best.delta_f1_vs_fp32).toFixed(3)}.
+    Karena itu rekomendasi mobile
+    <b>${esc(d.recommended_mobile_model || "–")} ${esc(d.recommended_mobile_quant || "")}</b>.`;
+}
+
+function renderInfo(st){
+  $("#infoList").innerHTML = (st.info || [])
+    .map(([k,v,mono]) =>
+      `<div><dt>${esc(k)}</dt><dd${mono ? ' class="mono"' : ""}>${esc(v)}</dd></div>`)
+    .join("");
+}
+
+async function renderKaggle(){
+  try { render(await kaggleState()); }
+  catch { render(demoState()); }
+}
+
+function chartSVG(series, {asPct=false, id="g0"} = {}){
+  const W = 700, H = 176, P = {t:12, r:14, b:20, l:42};
+  const vals = series.flatMap(([v]) => v || []).filter(v => typeof v === "number");
+  if (!vals.length) return "";
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = (hi - lo) || 1;
+  lo -= span * .08; hi += span * .08;
+  lo = Math.max(0, lo);
+  if (asPct) hi = Math.min(1, hi);
+  const n = Math.max(...series.map(([v]) => (v||[]).length));
+  const x = i => P.l + (W-P.l-P.r) * (n <= 1 ? 0 : i/(n-1));
+  const y = v => H-P.b - (v-lo)/(hi-lo) * (H-P.t-P.b);
+  const fmt = v => asPct ? (v*100).toFixed(0)+"%" : v.toFixed(2);
+
+  let grid = "";
+  for (let g = 0; g <= 3; g++){
+    const v = lo + (hi-lo)*g/3, yy = y(v);
+    grid += `<line x1="${P.l}" y1="${yy.toFixed(1)}" x2="${W-P.r}" y2="${yy.toFixed(1)}"
+               stroke="rgba(232,242,236,.09)" stroke-width="1"/>
+             <text x="${P.l-8}" y="${(yy+3).toFixed(1)}" text-anchor="end">${fmt(v)}</text>`;
+  }
+
+  let body = "";
+  series.forEach(([data, color], si) => {
+    if (!data || !data.length) return;
+    const d = data.map((v,i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    // fill only when the curve climbs, so a falling loss does not read as a slab
+    if (si === series.length-1 && data[data.length-1] > data[0]){
+      body += `<path class="area" fill="url(#${id})"
+        d="${d} L${x(data.length-1).toFixed(1)},${H-P.b} L${P.l},${H-P.b} Z"/>`;
+    }
+    body += `<path class="line" stroke="${color}" d="${d}"/>`;
+  });
+
+  const last = series[series.length-1][0];
+  const dot = last?.length
+    ? `<circle class="dot" cx="${x(last.length-1).toFixed(1)}" cy="${y(last[last.length-1]).toFixed(1)}"
+        r="3.2" fill="${series[series.length-1][1]}"/>` : "";
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik ${asPct?"akurasi":"loss"} per epoch">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(142,230,164,.18)"/>
+      <stop offset="100%" stop-color="rgba(142,230,164,0)"/>
+    </linearGradient></defs>
+    ${grid}${body}${dot}
+    <text x="${P.l}" y="${H-5}">1</text>
+    <text x="${W-P.r}" y="${H-5}" text-anchor="end">${n}</text>
+  </svg>`;
+}
+
+function animatePaths(){
+  document.querySelectorAll(".spark path.line").forEach(p => {
+    p.style.setProperty("--len", p.getTotalLength().toFixed(1));
+  });
+}
+
+function renderMatrix(st){
+  const host = $("#matrix");
+  $("#mxSub").textContent = isDemo() ? "aktual ↓ / prediksi → · contoh" : "aktual ↓ / prediksi →";
+  const cls = st.classes || [];
+  // angka mentah dari run asli lebih baik daripada PNG matplotlib berlatar putih
+  if (!st.matrix && st.images?.matrix){
+    host.innerHTML = `<img class="mx-img" src="${st.images.matrix}" alt="Confusion matrix hasil evaluasi">`;
+    return;
+  }
+  if (!cls.length){ host.innerHTML = ""; return; }
+
+  const n = cls.length;
+  const mx = st.matrix || demoMatrix(cls);
+  const max = Math.max(1, ...mx.flat());
+  $("#mxMax").textContent = String(max);
+
+  const cells = mx.flatMap((row, r) => row.map((v, c) => {
+    const a = v ? .05 + .93 * Math.pow(v/max, .6) : 0;
+    const rim = r === c ? "box-shadow:inset 0 0 0 1px rgba(255,255,255,.34);" : "";
+    return `<i style="background:rgba(142,230,164,${a.toFixed(3)});${rim}"
+      title="aktual ${String(r+1).padStart(2,"0")} → prediksi ${String(c+1).padStart(2,"0")}: ${v}"></i>`;
+  })).join("");
+
+  host.innerHTML = `
+    <div class="matrix">
+      <div class="mx-ylab">${cls.map((_,i)=>`<span>${String(i+1).padStart(2,"0")}</span>`).join("")}</div>
+      <div class="mx-grid" style="grid-template-columns:repeat(${n},1fr);grid-template-rows:repeat(${n},1fr)">${cells}</div>
+      <div></div>
+      <div class="mx-xlab" style="grid-template-columns:repeat(${n},1fr)">
+        ${cls.map((_,i)=>`<span>${String(i+1).padStart(2,"0")}</span>`).join("")}
+      </div>
+    </div>`;
+}
+
+/* Baris = support kelas, diagonal = recall, sisanya disebar ke tetangga.
+   Deterministik supaya angka contoh tidak berubah tiap muat. */
+function demoMatrix(cls){
+  const rnd = mulberry32(7);
+  const n = cls.length;
+  return cls.map((c, i) => {
+    const row = new Array(n).fill(0);
+    const sup = Math.max(2, c.support || 2);
+    row[i] = Math.round(sup * (c.recall || 0));
+    let left = sup - row[i], guard = 0;
+    while (left > 0 && guard++ < 5000){
+      const off = 1 + Math.floor(rnd() * 3);
+      row[(i + (rnd() < .5 ? -off : off) + n) % n]++;
+      left--;
+    }
+    return row;
+  });
+}
+
+async function loadRun(dir){
+  dir = dir.replace(/\/+$/, "");
+  $("#runPath").value = dir;
+  try {
+    const [names, history, cfg, device] = await Promise.all([
+      getJSON(dir + "/class_names.json"),
+      getJSON(dir + "/history.json").catch(() => null),
+      getJSON(dir + "/config_used.json").catch(() => null),
+      getJSON(dir + "/device.json").catch(() => null)
+    ]);
+    const metrics = await getJSON(dir + "/test_metrics.json")
+      .catch(() => getJSON(dir + "/val_metrics.json"))
+      .catch(() => null);
+    const per = metrics?.per_class
+      || await getJSON(dir + "/test_per_class.json").catch(() => []);
+
+    const tag = metrics?.split || "test";
+    const [hasMatrix, hasSamples, cmJson] = await Promise.all([
+      exists(`${dir}/${tag}_confusion_matrix.png`),
+      exists(`${dir}/${tag}_sample_predictions.png`),
+      getJSON(`${dir}/${tag}_confusion_matrix.json`).catch(() => null)
+    ]);
+
+    const classes = names.map((name, i) => {
+      const row = per.find(p => p.class === name) || per[i] || {};
+      return { name, precision:row.precision ?? null, recall:row.recall ?? null,
+               f1:row.f1 ?? null, support:row.support ?? null };
+    });
+
+    const mc = cfg?.model || {}, tc = cfg?.train || {}, dc = cfg?.data || {};
+    const val = Number(dc.val_split ?? .15), test = Number(dc.test_split ?? .15);
+    const subset = Number(dc.max_per_class || 0);
+    const meta = [
+      [mc.arch || "–", "arsitektur"],
+      [`${dc.img_height || "?"} × ${dc.img_width || "?"} × ${dc.channels || 3}`, "input"],
+      [String(dc.batch_size ?? "–"), "batch"],
+      [tc.optimizer || "–", "optimizer"],
+      [String(device?.active || device?.device || "–").split(" (")[0], "device"]
+    ];
+    if (subset) meta.push([`${subset}/kelas`, "subset"]);
+
+    render({
+      kind:"run", label:dir.split("/").pop(),
+      classes,
+      lede:[
+        `${names.length} kelas`,
+        `${(metrics?.samples ?? 0).toLocaleString("id-ID")} sampel uji`,
+        `split ${Math.round((1-val-test)*100)}/${Math.round(val*100)}/${Math.round(test*100)}`,
+        subset ? `maks ${subset} gambar/kelas` : "seluruh dataset"
+      ].join(" · "),
+      distTitle:"Sampel uji per kelas", distUnit:"sampel uji",
+      classWeight:tc.class_weight || "balanced",
+      matrix: cmJson || null,
+      history: history || {},
+      metrics: metrics || {},
+      meta,
+      images:{ matrix: hasMatrix ? `${dir}/${tag}_confusion_matrix.png` : null,
+               samples: hasSamples ? `${dir}/${tag}_sample_predictions.png` : null }
+    });
+  } catch {
+    render(demoState());
+    $("#runPath").value = dir;
+    $("#banner").hidden = false;
+    $("#banner").lastElementChild.innerHTML =
+      `<b>Tidak bisa memuat ${esc(dir)}.</b> Cek nama foldernya, atau buka lewat
+       <code>python -m http.server</code> supaya <code>runs/</code> bisa dibaca.`;
+  }
+}
+
+async function discoverRuns(){
+  try {
+    const res = await fetch("runs/", {cache:"no-store"});
+    if (!res.ok) return [];
+    const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+    return [...doc.querySelectorAll("a")]
+      .map(a => a.getAttribute("href"))
+      .filter(h => h && h.endsWith("/") && !h.startsWith(".") && !h.startsWith("/") && !h.includes("?"))
+      .map(h => h.replace(/\/$/, ""));
+  } catch { return []; }
+}
+
+(async function boot(){
+  const params = new URLSearchParams(location.search);
+  if (params.get("glass") === "full") document.documentElement.dataset.glass = "full";
+
+  document.querySelectorAll(".glass").forEach(el => {
+    el.addEventListener("pointermove", e => {
+      const r = el.getBoundingClientRect();
+      el.style.setProperty("--mx", ((e.clientX-r.left)/r.width*100).toFixed(1) + "%");
+      el.style.setProperty("--my", ((e.clientY-r.top)/r.height*100).toFixed(1) + "%");
+    });
+  });
+
+  const [runs, meta] = await Promise.all([
+    discoverRuns(),
+    getJSON(KAGGLE_PATH).catch(() => null)
+  ]);
+
+  const sel = $("#runSel");
+  if (meta) {
+    const web = meta.models?.[meta.recommended_web_model];
+    sel.add(new Option("Hasil deliverable · " + (web?.arch || "Kaggle"), "kaggle"));
+  }
+  runs.forEach(r => sel.add(new Option(r, "runs/" + r)));
+  sel.addEventListener("change", () => {
+    if (sel.value === "kaggle") renderKaggle();
+    else if (sel.value) loadRun(sel.value);
+    else render(demoState());
+  });
+  $("#runPath").addEventListener("keydown", e => {
+    if (e.key === "Enter" && e.target.value.trim()) loadRun(e.target.value.trim());
+  });
+
+  // default: hasil deliverable kalau ada, karena itu angka yang dilaporkan
+  const q = params.get("run");
+  if (q) await loadRun(q);
+  else if (meta) { sel.value = "kaggle"; await renderKaggle(); }
+  else render(demoState());
+})();
+</script>
+</body>
+</html>

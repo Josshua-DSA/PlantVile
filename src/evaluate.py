@@ -257,6 +257,10 @@ def _plots(y_true, y_pred, class_names, history, cfg, run_dir, tag):
         cm = confusion_matrix(
             y_true, y_pred.argmax(axis=1), labels=list(range(len(class_names)))
         )
+        # angka mentahnya ikut disimpan supaya dashboard bisa menggambar ulang
+        # dengan paletnya sendiri, tidak menempel PNG matplotlib berlatar putih
+        save_json(os.path.join(run_dir, "%s_confusion_matrix.json" % tag),
+                  cm.tolist())
         side = max(8, len(class_names) * 0.34)
         fig = plt.figure(figsize=(side, side * 0.85))
         sns.heatmap(
@@ -361,14 +365,14 @@ def _sample_grid(model, paths, true_labels, class_names, count, cfg, run_dir, ta
 
     cols = 4
     rows = int(np.ceil(len(indices) / cols))
-    fig = plt.figure(figsize=(4 * cols, 3.4 * rows))
+    fig = plt.figure(figsize=(4 * cols, 3.4 * rows), facecolor="#081310")
     for slot, (idx, display_rgb, probs) in enumerate(
         zip(indices, displays, all_probs), start=1
     ):
         pred = int(np.argmax(probs))
         plt.subplot(rows, cols, slot)
         plt.imshow(display_rgb)
-        color = "green" if pred == true_labels[idx] else "red"
+        color = "#8ee6a4" if pred == true_labels[idx] else "#f0c274"
         plt.title(
             "%s\npred: %s (%.2f)" % (
                 class_names[true_labels[idx]], class_names[pred], float(probs[pred])
@@ -378,7 +382,7 @@ def _sample_grid(model, paths, true_labels, class_names, count, cfg, run_dir, ta
         plt.axis("off")
     plt.tight_layout()
     path = os.path.join(run_dir, "%s_sample_predictions.png" % tag)
-    plt.savefig(path, dpi=140)
+    plt.savefig(path, dpi=140, facecolor="#081310")
     plt.close(fig)
     return path
 
