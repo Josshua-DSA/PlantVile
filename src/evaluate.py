@@ -36,6 +36,10 @@ def _plots(y_true, y_pred, class_names, history, cfg, run_dir, tag):
         from sklearn.metrics import confusion_matrix
         cm = confusion_matrix(y_true, y_pred.argmax(axis=1),
                               labels=list(range(len(class_names))))
+        # angka mentahnya ikut disimpan supaya dashboard bisa menggambar ulang
+        # dengan paletnya sendiri, tidak menempel PNG matplotlib berlatar putih
+        save_json(os.path.join(run_dir, "%s_confusion_matrix.json" % tag),
+                  cm.tolist())
         side = max(8, len(class_names) * 0.34)
         plt.figure(figsize=(side, side * 0.85))
         sns.heatmap(cm, annot=len(class_names) <= 20, fmt="d", cmap="Blues",
@@ -90,11 +94,14 @@ def _sample_grid(model, paths, true_labels, class_names, count, cfg, run_dir, ta
     indices = np.linspace(0, len(paths) - 1, min(count, len(paths))).astype(int)
     cols = 4
     rows = int(np.ceil(len(indices) / cols))
-    plt.figure(figsize=(4 * cols, 3.4 * rows))
+    plt.figure(figsize=(4 * cols, 3.4 * rows), facecolor="#081310")
     for slot, idx in enumerate(indices, start=1):
         image = keras.utils.load_img(paths[idx],
                                      target_size=(data["img_height"], data["img_width"]))
         array = keras.utils.img_to_array(image)
+        # preprocess_input membagi array di tempat, dan expand_dims hanya view,
+        # jadi simpan salinan uint8 dulu atau gambarnya ikut ternormalisasi
+        display = array.astype("uint8")
         batch = np.expand_dims(array, 0)
         if data["normalize"] == "imagenet" and cfg["model"]["arch"] != "simple_cnn":
             from keras.applications import (
@@ -112,15 +119,15 @@ def _sample_grid(model, paths, true_labels, class_names, count, cfg, run_dir, ta
         probs = model.predict(batch, verbose=0)[0]
         pred = int(np.argmax(probs))
         plt.subplot(rows, cols, slot)
-        plt.imshow(array.astype("uint8"))
-        color = "green" if pred == true_labels[idx] else "red"
+        plt.imshow(display)
+        color = "#8ee6a4" if pred == true_labels[idx] else "#f0c274"
         plt.title("%s\npred: %s (%.2f)" % (
             class_names[true_labels[idx]], class_names[pred], float(probs[pred])),
             fontsize=8, color=color)
         plt.axis("off")
     plt.tight_layout()
     path = os.path.join(run_dir, "%s_sample_predictions.png" % tag)
-    plt.savefig(path, dpi=140)
+    plt.savefig(path, dpi=140, facecolor="#081310")
     plt.close()
     return path
 

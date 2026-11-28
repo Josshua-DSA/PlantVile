@@ -228,13 +228,16 @@ h1 em{font-style:italic;font-weight:500;color:var(--leaf);font-variation-setting
   grid-template-columns:repeat(12,minmax(0,1fr));
   grid-template-areas:
     "curves curves curves curves curves curves curves curves dist dist dist dist"
-    "matrix matrix matrix matrix matrix classes classes classes classes classes classes classes";
+    "matrix matrix matrix matrix matrix classes classes classes classes classes classes classes"
+    "samples samples samples samples samples samples samples samples samples samples samples samples";
 }
 .panel{padding:20px 22px 18px;min-width:0}
 .p-curves{grid-area:curves}
 .p-dist{grid-area:dist}
-.p-matrix{grid-area:matrix}
+.p-matrix{grid-area:matrix;align-self:start}
 .p-classes{grid-area:classes}
+.p-samples{grid-area:samples}
+.p-samples[hidden]{display:none}
 
 .head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
 .head h2{margin:0;font-size:13.5px;font-weight:600}
@@ -317,8 +320,7 @@ td.barcell{width:32%}
 .mx-legend .ramp{flex:1;height:4px;border-radius:99px;
   background:linear-gradient(90deg,rgba(142,230,164,.06),rgba(142,230,164,.95))}
 
-.samples{margin-top:16px}
-.samples img{width:100%;border-radius:var(--r-sm);display:block;border:1px solid var(--line)}
+.p-samples img{width:100%;border-radius:var(--r-sm);display:block;border:1px solid var(--line)}
 
 .foot{
   margin-top:clamp(26px,4vw,40px);padding-top:18px;
@@ -337,7 +339,8 @@ td.barcell{width:32%}
   .grid{grid-template-columns:repeat(6,minmax(0,1fr));grid-template-areas:
     "curves curves curves curves curves curves"
     "dist dist dist matrix matrix matrix"
-    "classes classes classes classes classes classes"}
+    "classes classes classes classes classes classes"
+    "samples samples samples samples samples samples"}
   .hero{grid-template-columns:1fr;gap:32px}
   .lens-wrap{flex-direction:row;justify-content:flex-start;gap:30px;align-items:center}
   .ribbon{grid-template-columns:repeat(3,minmax(0,1fr))}
@@ -353,12 +356,12 @@ td.barcell{width:32%}
   .ribbon .cell{padding:13px 14px}
   .ribbon .cell:nth-child(odd){border-left:0;padding-left:0}
   .ribbon .cell:nth-child(n+3){border-top:1px solid var(--line)}
-  .grid{grid-template-columns:1fr;grid-template-areas:"curves" "dist" "matrix" "classes"}
+  .grid{grid-template-columns:1fr;grid-template-areas:"curves" "dist" "matrix" "classes" "samples"}
   .lens-wrap{flex-direction:column;align-items:flex-start}
   .lens-stats{gap:20px}
   .panel{padding:16px 14px 14px}
   td.barcell{display:none}
-  td.nm{max-width:150px}
+  td.nm{max-width:none;white-space:normal;line-height:1.35}
   .chart-row .lbl{width:44px;font-size:10.5px}
 }
 @media (prefers-reduced-motion:reduce){
@@ -405,8 +408,7 @@ td.barcell{width:32%}
       <div>
         <p class="eyebrow">UAS Neuro Computing · klasifikasi citra</p>
         <h1>Mendiagnosis penyakit <em>daun</em> dari citra RGB</h1>
-        <p class="lede">Hasil evaluasi model pada PlantVillage: 15 kelas, 20.638 gambar,
-          split terstratifikasi 70/15/15.</p>
+        <p class="lede" id="lede"></p>
         <ul class="runmeta" id="runmeta"></ul>
       </div>
       <div class="lens-wrap">
@@ -447,7 +449,7 @@ td.barcell{width:32%}
 
       <article class="panel sheet p-dist rise" style="--d:.24s">
         <div class="head">
-          <h2>Ukuran tiap kelas</h2>
+          <h2 id="distTitle">Ukuran tiap kelas</h2>
           <span class="sub n" id="distSub"></span>
         </div>
         <ul class="dist" id="dist"></ul>
@@ -483,7 +485,14 @@ td.barcell{width:32%}
             <tbody id="clsBody"></tbody>
           </table>
         </div>
-        <div class="samples" id="samples"></div>
+      </article>
+
+      <article class="panel sheet p-samples rise" style="--d:.42s" id="samplesPanel" hidden>
+        <div class="head">
+          <h2>Contoh prediksi</h2>
+          <span class="sub">label asli, prediksi, dan keyakinan model</span>
+        </div>
+        <div id="samples"></div>
       </article>
     </div>
   </main>
@@ -545,6 +554,8 @@ function demoState(){
   return {
     kind:"demo", label:"angka contoh",
     classes,
+    lede:"Angka contoh. Dataset PlantVillage: 15 kelas, 20.638 gambar, split terstratifikasi 70/15/15.",
+    distTitle:"Ukuran tiap kelas", distUnit:"gambar", classWeight:"balanced",
     history:DEMO_HISTORY,
     metrics:{ split:"test", samples:classes.reduce((s,c)=>s+c.support,0),
               accuracy:.9412, precision_macro:.9331, recall_macro:.9268,
@@ -596,6 +607,8 @@ function render(st){
   $("#footSrc").textContent = "sumber: " + (st.kind === "demo" ? "angka contoh" : st.label);
   document.title = "PlantVile · " + (st.kind === "demo" ? "angka contoh" : st.label);
 
+  $("#lede").innerHTML = esc(st.lede || "");
+  $("#distTitle").textContent = st.distTitle || "Ukuran tiap kelas";
   $("#heroNum").innerHTML = `${pct(acc)}<sup>%</sup>`;
   const C = 2*Math.PI*104, ring = $("#ring");
   ring.setAttribute("stroke-dasharray", C.toFixed(2));
@@ -644,7 +657,8 @@ function render(st){
   const counts = sorted.map(c => c.total || c.support || 0);
   const maxCount = Math.max(1, ...counts), minCount = Math.min(...counts.filter(Boolean));
   const totalAll = counts.reduce((s,v) => s+v, 0);
-  $("#distSub").textContent = `${totalAll.toLocaleString("id-ID")} gambar · ${cls.length} kelas`;
+  $("#distSub").textContent =
+    `${totalAll.toLocaleString("id-ID")} ${st.distUnit || "gambar"} · ${cls.length} kelas`;
   $("#dist").innerHTML = sorted.map((c,i) => {
     const v = c.total || c.support;
     return `<li title="${esc(c.name)}">
@@ -655,8 +669,8 @@ function render(st){
   }).join("");
   $("#distNote").innerHTML = minCount
     ? `Kelas terbesar <b>${(maxCount/minCount).toFixed(0)}×</b> kelas terkecil
-       (${maxCount.toLocaleString("id-ID")} vs ${minCount.toLocaleString("id-ID")} gambar),
-       jadi <b>train.class_weight=balanced</b> aktif.`
+       (${maxCount.toLocaleString("id-ID")} vs ${minCount.toLocaleString("id-ID")}),
+       jadi <b>class_weight=${esc(st.classWeight || "balanced")}</b> dipakai.`
     : "";
 
   // per-class, sorted by F1
@@ -686,6 +700,7 @@ function render(st){
   $("#samples").innerHTML = st.images?.samples
     ? `<img src="${st.images.samples}" alt="Grid contoh prediksi: label asli dan prediksi model">`
     : "";
+  $("#samplesPanel").hidden = !st.images?.samples;
 }
 
 function chartSVG(series, {asPct=false, id="g0"} = {}){
@@ -747,11 +762,12 @@ function animatePaths(){
 function renderMatrix(st){
   const host = $("#matrix");
   $("#mxSub").textContent = isDemo() ? "aktual ↓ / prediksi → · contoh" : "aktual ↓ / prediksi →";
-  if (st.images?.matrix){
+  const cls = st.classes || [];
+  // angka mentah dari run asli lebih baik daripada PNG matplotlib berlatar putih
+  if (!st.matrix && st.images?.matrix){
     host.innerHTML = `<img class="mx-img" src="${st.images.matrix}" alt="Confusion matrix hasil evaluasi">`;
     return;
   }
-  const cls = st.classes || [];
   if (!cls.length){ host.innerHTML = ""; return; }
 
   const n = cls.length;
@@ -813,9 +829,10 @@ async function loadRun(dir){
       || await getJSON(dir + "/test_per_class.json").catch(() => []);
 
     const tag = metrics?.split || "test";
-    const [hasMatrix, hasSamples] = await Promise.all([
+    const [hasMatrix, hasSamples, cmJson] = await Promise.all([
       exists(`${dir}/${tag}_confusion_matrix.png`),
-      exists(`${dir}/${tag}_sample_predictions.png`)
+      exists(`${dir}/${tag}_sample_predictions.png`),
+      getJSON(`${dir}/${tag}_confusion_matrix.json`).catch(() => null)
     ]);
 
     const classes = names.map((name, i) => {
@@ -825,18 +842,32 @@ async function loadRun(dir){
     });
 
     const mc = cfg?.model || {}, tc = cfg?.train || {}, dc = cfg?.data || {};
+    const val = Number(dc.val_split ?? .15), test = Number(dc.test_split ?? .15);
+    const subset = Number(dc.max_per_class || 0);
+    const meta = [
+      [mc.arch || "–", "arsitektur"],
+      [`${dc.img_height || "?"} × ${dc.img_width || "?"} × ${dc.channels || 3}`, "input"],
+      [String(dc.batch_size ?? "–"), "batch"],
+      [tc.optimizer || "–", "optimizer"],
+      [String(device?.active || device?.device || "–").split(" (")[0], "device"]
+    ];
+    if (subset) meta.push([`${subset}/kelas`, "subset"]);
+
     render({
       kind:"run", label:dir.split("/").pop(),
       classes,
+      lede:[
+        `${names.length} kelas`,
+        `${(metrics?.samples ?? 0).toLocaleString("id-ID")} sampel uji`,
+        `split ${Math.round((1-val-test)*100)}/${Math.round(val*100)}/${Math.round(test*100)}`,
+        subset ? `maks ${subset} gambar/kelas` : "seluruh dataset"
+      ].join(" · "),
+      distTitle:"Sampel uji per kelas", distUnit:"sampel uji",
+      classWeight:tc.class_weight || "balanced",
+      matrix: cmJson || null,
       history: history || {},
       metrics: metrics || {},
-      meta:[
-        [mc.arch || "–", "arsitektur"],
-        [`${dc.img_height || "?"} × ${dc.img_width || "?"} × ${dc.channels || 3}`, "input"],
-        [String(dc.batch_size ?? "–"), "batch"],
-        [tc.optimizer || "–", "optimizer"],
-        [device?.device || "–", "device"]
-      ],
+      meta,
       images:{ matrix: hasMatrix ? `${dir}/${tag}_confusion_matrix.png` : null,
                samples: hasSamples ? `${dir}/${tag}_sample_predictions.png` : null }
     });
