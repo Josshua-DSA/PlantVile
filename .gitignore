@@ -2,6 +2,22 @@
 data/
 runs/
 
+# results deliverable: track documentation (.md) and lightweight metadata only
+results/*
+!results/README.md
+!results/artifacts/
+results/artifacts/*
+!results/artifacts/*.md
+!results/artifacts/labels.txt
+!results/artifacts/class_names.json
+!results/artifacts/model_metadata.json
+!results/reports/
+results/reports/*
+!results/reports/REPORTS_INDEX.md
+
+# large archives & binaries
+*.zip
+
 # python
 __pycache__/
 *.py[cod]
@@ -11,7 +27,9 @@ __pycache__/
 *.keras
 *.h5
 *.weights.h5
+*.tflite
 
-# env
+# env & test cache
 venv/
 .venv/
+.pytest_cache/

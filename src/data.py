@@ -1,7 +1,10 @@
 """Dataset: index the PlantVillage folder tree, split it, and build tf.data pipelines."""
+import hashlib
 import os
 import random
+import re
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import tensorflow as tf
@@ -38,13 +41,71 @@ def resolve_variant_dir(root: str, variant: str) -> str:
     )
 
 
-def scan_dataset(root: str, variant: str, class_subset=None, max_per_class: int = 0):
+def _md5_file(item):
+    idx, fpath = item
+    with open(fpath, "rb") as fh:
+        return idx, hashlib.md5(fh.read()).hexdigest()
+
+
+def _deduplicate_paths(paths: list[str], labels: list[int]) -> tuple[list[str], list[int], int]:
+    """Drop subsequent exact MD5 duplicates deterministically without touching disk."""
+    by_size = defaultdict(list)
+    for idx, fpath in enumerate(paths):
+        by_size[os.path.getsize(fpath)].append((idx, fpath))
+
+    candidates = [item for grp in by_size.values() if len(grp) > 1 for item in grp]
+    if not candidates:
+        return paths, labels, 0
+
+    digests = {}
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for idx, digest in pool.map(_md5_file, candidates):
+            digests[idx] = digest
+
+    seen_hashes: dict[str, int] = {}
+    kept_paths, kept_labels = [], []
+    dropped = 0
+    for idx, (fpath, lbl) in enumerate(zip(paths, labels)):
+        digest = digests.get(idx)
+        if digest is not None:
+            if digest in seen_hashes:
+                if seen_hashes[digest] != lbl:
+                    print(
+                        "[WARN] Deduplikasi MD5 lintas-kelas terdeteksi: %s (label %d vs %d)"
+                        % (fpath, seen_hashes[digest], lbl)
+                    )
+                dropped += 1
+                continue
+            seen_hashes[digest] = lbl
+        kept_paths.append(fpath)
+        kept_labels.append(lbl)
+    return kept_paths, kept_labels, dropped
+
+
+def scan_dataset(root: str, variant: str, class_subset=None, max_per_class: int = 0,
+                 deduplicate: bool = False):
     """Return (paths, labels, class_names) plus a per-class count dict."""
     variant_dir = resolve_variant_dir(root, variant)
-    all_classes = sorted(
+    raw_dirs = sorted(
         d for d in os.listdir(variant_dir)
         if os.path.isdir(os.path.join(variant_dir, d))
     )
+    all_classes = []
+    skipped_dirs = []
+    for d in raw_dirs:
+        cdir = os.path.join(variant_dir, d)
+        has_images = any(
+            f.endswith(IMG_EXTS) and os.path.isfile(os.path.join(cdir, f))
+            for f in os.listdir(cdir)
+        )
+        if has_images:
+            all_classes.append(d)
+        else:
+            skipped_dirs.append(d)
+
+    if skipped_dirs:
+        print("[WARN] Mengabaikan subfolder tanpa citra langsung: %s"
+              % ", ".join(skipped_dirs))
     if not all_classes:
         raise RuntimeError("tidak ada subfolder kelas di %s" % variant_dir)
 
@@ -57,7 +118,6 @@ def scan_dataset(root: str, variant: str, class_subset=None, max_per_class: int 
     else:
         class_names = all_classes
 
-    rng = random.Random(0)  # fixed order before the split seed is applied
     paths, labels = [], []
     for label, cls in enumerate(class_names):
         cls_dir = os.path.join(variant_dir, cls)
@@ -65,20 +125,50 @@ def scan_dataset(root: str, variant: str, class_subset=None, max_per_class: int 
             os.path.join(cls_dir, f) for f in os.listdir(cls_dir)
             if f.endswith(IMG_EXTS) and os.path.isfile(os.path.join(cls_dir, f))
         )
-        if max_per_class and len(files) > max_per_class:
-            files = sorted(rng.sample(files, max_per_class))
         if not files:
             raise RuntimeError("kelas '%s' tidak berisi gambar" % cls)
         paths.extend(files)
         labels.extend([label] * len(files))
 
+    if deduplicate:
+        paths, labels, dropped = _deduplicate_paths(paths, labels)
+        if dropped:
+            print("[INFO] Deduplikasi MD5: membuang %d file duplikat persis" % dropped)
+
+    if max_per_class:
+        rng = random.Random(0)  # fixed order before the split seed is applied
+        by_label = defaultdict(list)
+        for fpath, lbl in zip(paths, labels):
+            by_label[lbl].append(fpath)
+        capped_paths, capped_labels = [], []
+        for label in range(len(class_names)):
+            files = by_label[label]
+            if len(files) > max_per_class:
+                files = sorted(rng.sample(files, max_per_class))
+            if not files:
+                raise RuntimeError("kelas '%s' tidak berisi gambar" % class_names[label])
+            capped_paths.extend(files)
+            capped_labels.extend([label] * len(files))
+        paths, labels = capped_paths, capped_labels
+
     return paths, labels, class_names, dict(Counter(labels))
 
 
 # --------------------------------------------------------------------------- split
+def _leaf_group_key(path: str) -> str:
+    """Group multi-photo captures of the same physical leaf (e.g. Leaf 259.1/.2)."""
+    fname = os.path.basename(path)
+    rhs = fname.split("___", 1)[1] if "___" in fname else fname
+    match = re.search(r"^(.*?\bLeaf\s+\d+)(?:\.\d+)?\b", rhs, flags=re.I)
+    if match:
+        return " ".join(match.group(1).lower().split())
+    return path
+
+
 def split_dataset(paths, labels, val_split: float, test_split: float,
-                  strategy: str = "stratified", seed: int = 42):
-    """Per-class split. Returns index lists for train/val/test."""
+                  strategy: str = "stratified", seed: int = 42,
+                  group_same_leaf: bool = False):
+    """Per-class (optionally group-aware) split. Returns index lists for train/val/test."""
     rng = random.Random(seed)
     by_class = defaultdict(list)
     for idx, label in enumerate(labels):
@@ -87,10 +177,35 @@ def split_dataset(paths, labels, val_split: float, test_split: float,
     train_idx, val_idx, test_idx = [], [], []
     for label, indices in sorted(by_class.items()):
         indices = list(indices)
-        if strategy == "per_class_tail":
-            n = len(indices)
-            n_test = int(round(n * test_split))
-            n_val = int(round(n * val_split))
+        n = len(indices)
+        n_test = int(round(n * test_split))
+        n_val = int(round(n * val_split))
+
+        if group_same_leaf:
+            grouped = defaultdict(list)
+            for idx in indices:
+                grouped[_leaf_group_key(paths[idx])].append(idx)
+            groups = [grouped[k] for k in sorted(grouped.keys())]
+            if strategy == "per_class_tail":
+                ordered_groups = list(reversed(groups))
+            else:
+                rng.shuffle(groups)
+                ordered_groups = groups
+
+            test_c, val_c, train_c = [], [], []
+            rem = n
+            for grp in ordered_groups:
+                if len(test_c) < n_test and rem - len(grp) >= 1:
+                    test_c.extend(grp)
+                elif len(val_c) < n_val and rem - len(grp) >= 1:
+                    val_c.extend(grp)
+                else:
+                    train_c.extend(grp)
+                rem -= len(grp)
+            test_idx.extend(test_c)
+            val_idx.extend(val_c)
+            train_idx.extend(train_c)
+        elif strategy == "per_class_tail":
             test_slice = indices[n - n_test:] if n_test else []
             val_slice = indices[n - n_test - n_val: n - n_test] if n_val else []
             train_slice = indices[: n - n_test - n_val]
@@ -99,9 +214,6 @@ def split_dataset(paths, labels, val_split: float, test_split: float,
             train_idx.extend(train_slice)
         else:  # stratified
             rng.shuffle(indices)
-            n = len(indices)
-            n_test = int(round(n * test_split))
-            n_val = int(round(n * val_split))
             test_idx.extend(indices[:n_test])
             val_idx.extend(indices[n_test: n_test + n_val])
             train_idx.extend(indices[n_test + n_val:])
@@ -144,12 +256,13 @@ def _make_normalizer(cfg_data, arch: str):
         return lambda image: image  # decoder already produced [0,1] when rescale=true
     if mode == "imagenet" and arch != "simple_cnn" and channels == 3:
         from keras.applications import (
-            efficientnet, mobilenet_v2, resnet, vgg16,
+            efficientnet, mobilenet_v2, mobilenet_v3, resnet, vgg16,
         )
         preprocess = {
             "vgg16": vgg16.preprocess_input,
             "resnet50": resnet.preprocess_input,
             "mobilenetv2": mobilenet_v2.preprocess_input,
+            "mobilenetv3_large": mobilenet_v3.preprocess_input,
             "efficientnetb0": efficientnet.preprocess_input,
         }[arch]
         # preprocess_input expects 0..255 floats; rescale to that range when needed
@@ -159,78 +272,166 @@ def _make_normalizer(cfg_data, arch: str):
     return lambda image: image
 
 
-def _make_augmenter(cfg_data):
+def preprocess_image(image_or_path, cfg_data, arch: str):
+    """Load/resize one image with the exact same tf.image decoding & normalization as tf.data.
+
+    Returns (display_rgb_uint8, model_input_batch_float32).
+    """
+    height = cfg_data["img_height"]
+    width = cfg_data["img_width"]
+    channels = cfg_data["channels"]
+
+    if isinstance(image_or_path, (str, os.PathLike)):
+        raw = tf.io.read_file(os.fspath(image_or_path))
+        decoded = tf.io.decode_image(raw, channels=channels, expand_animations=False)
+        img_01 = tf.image.convert_image_dtype(decoded, tf.float32)
+        img_01.set_shape([None, None, channels])
+        resized_01 = tf.image.resize(img_01, [height, width], method="bilinear")
+        if channels == 3:
+            rgb_01 = resized_01
+        else:
+            decoded_rgb = tf.io.decode_image(raw, channels=3, expand_animations=False)
+            rgb_01 = tf.image.resize(
+                tf.image.convert_image_dtype(decoded_rgb, tf.float32),
+                [height, width],
+                method="bilinear",
+            )
+    else:
+        rgb_arr = np.asarray(image_or_path.convert("RGB"), dtype=np.float32) / 255.0
+        rgb_01 = tf.image.resize(tf.convert_to_tensor(rgb_arr), [height, width], method="bilinear")
+        if channels == 1:
+            gray_arr = np.asarray(image_or_path.convert("L"), dtype=np.float32)[..., None] / 255.0
+            resized_01 = tf.image.resize(
+                tf.convert_to_tensor(gray_arr), [height, width], method="bilinear"
+            )
+        else:
+            resized_01 = rgb_01
+
+    display_rgb = np.clip(np.round(rgb_01.numpy() * 255.0), 0, 255).astype(np.uint8)
+    tensor = resized_01 if cfg_data["rescale"] else (resized_01 * 255.0)
+    batch_tf = tf.expand_dims(tensor, axis=0)
+    normalize = _make_normalizer(cfg_data, arch)
+    batch = np.asarray(normalize(batch_tf), dtype=np.float32)
+    return display_rgb, batch
+
+
+def _make_augmenter(cfg_data, dtype=None):
+    """Build Keras spatial/color augmentation Sequential; optional float32 dtype for GPU mixed_float16."""
     from keras import layers, Sequential
 
+    layer_kwargs = {"dtype": dtype} if dtype is not None else {}
     augmenters = []
     if cfg_data["aug_rotation"] > 0:
-        augmenters.append(layers.RandomRotation(cfg_data["aug_rotation"]))
+        augmenters.append(layers.RandomRotation(cfg_data["aug_rotation"], **layer_kwargs))
     if cfg_data["aug_width_shift"] > 0 or cfg_data["aug_height_shift"] > 0:
         augmenters.append(layers.RandomTranslation(
             cfg_data["aug_height_shift"], cfg_data["aug_width_shift"],
-            fill_mode=cfg_data["aug_fill_mode"]))
+            fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_zoom"] > 0:
         augmenters.append(layers.RandomZoom(cfg_data["aug_zoom"],
-                                            fill_mode=cfg_data["aug_fill_mode"]))
+                                            fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_shear"] > 0:
         shear = cfg_data["aug_shear"]
         augmenters.append(layers.RandomShear(shear, shear,
-                                             fill_mode=cfg_data["aug_fill_mode"]))
+                                             fill_mode=cfg_data["aug_fill_mode"], **layer_kwargs))
     if cfg_data["aug_hflip"] and cfg_data["aug_vflip"]:
-        augmenters.append(layers.RandomFlip("horizontal_and_vertical"))
+        augmenters.append(layers.RandomFlip("horizontal_and_vertical", **layer_kwargs))
     elif cfg_data["aug_hflip"]:
-        augmenters.append(layers.RandomFlip("horizontal"))
+        augmenters.append(layers.RandomFlip("horizontal", **layer_kwargs))
     elif cfg_data["aug_vflip"]:
-        augmenters.append(layers.RandomFlip("vertical"))
+        augmenters.append(layers.RandomFlip("vertical", **layer_kwargs))
     if cfg_data["aug_brightness"] > 0:
         augmenters.append(layers.RandomBrightness(cfg_data["aug_brightness"],
-                                                  value_range=(0.0, 1.0)))
+                                                  value_range=(0.0, 1.0), **layer_kwargs))
     if cfg_data["aug_contrast"] > 0:
         augmenters.append(layers.RandomContrast(cfg_data["aug_contrast"],
-                                                value_range=(0.0, 1.0)))
+                                                value_range=(0.0, 1.0), **layer_kwargs))
     if not augmenters:
         return None
     return Sequential(augmenters, name="augment")
 
 
+def _disk_cache_key(paths, labels, cfg_data, split_name: str) -> str:
+    """Compute a deterministic SHA-1 suffix for tf.data disk cache invalidation."""
+    hasher = hashlib.sha1()
+    meta = (
+        split_name,
+        cfg_data["img_height"],
+        cfg_data["img_width"],
+        cfg_data["channels"],
+        cfg_data["rescale"],
+        cfg_data["variant"],
+        cfg_data["deduplicate"],
+        cfg_data["group_same_leaf"],
+        cfg_data["shuffle_seed"],
+    )
+    hasher.update(repr(meta).encode("utf-8"))
+    for p, lbl in zip(paths, labels):
+        hasher.update(f"|{p}:{lbl}".encode("utf-8"))
+    return hasher.hexdigest()[:12]
+
+
 def build_dataset(paths, labels, cfg_data, cfg_runtime, cfg_model,
-                  training: bool = False, batch_size=None, one_hot: bool = False):
-    """tf.data pipeline: decode -> resize -> augment(train only) -> normalize -> batch."""
+                  training: bool = False, batch_size=None, one_hot: bool = False,
+                  split_name: str = "split", augment_in_pipeline: bool = True):
+    """tf.data pipeline: decode -> cache -> shuffle(train) -> batch -> post-batch -> prefetch."""
     batch_size = batch_size or cfg_data["batch_size"]
     decode = _make_decoder(cfg_data)
+    run_aug_in_pipe = bool(training and cfg_data["augment"] and augment_in_pipeline)
+    skip_norm_for_model_aug = bool(training and cfg_data["augment"] and not augment_in_pipeline)
     normalize = _make_normalizer(cfg_data, cfg_model["arch"])
-    augment = _make_augmenter(cfg_data) if (training and cfg_data["augment"]) else None
+    augment = _make_augmenter(cfg_data) if run_aug_in_pipe else None
     num_classes = cfg_runtime.get("_num_classes", 0)
+    par_calls = (
+        AUTOTUNE
+        if cfg_runtime["num_parallel_calls"] <= 0
+        else cfg_runtime["num_parallel_calls"]
+    )
+    prefetch_buf = AUTOTUNE if cfg_data["prefetch"] <= 0 else cfg_data["prefetch"]
 
     ds = tf.data.Dataset.from_tensor_slices((list(paths), list(labels)))
-    if training:
-        ds = ds.shuffle(buffer_size=min(len(paths), 10000),
-                        seed=cfg_runtime["seed"], reshuffle_each_iteration=True)
-    ds = ds.map(decode, num_parallel_calls=cfg_runtime["num_parallel_calls"])
+    ds = ds.map(decode, num_parallel_calls=par_calls)
 
     if cfg_data["cache"] == "memory":
         ds = ds.cache()
     elif cfg_data["cache"] == "disk":
-        cache_path = os.path.join(cfg_runtime["runs_dir"], ".cache",
-                                  "cache_%d_%d_%s" % (
-                                      cfg_data["img_height"], cfg_data["img_width"],
-                                      cfg_data["variant"]))
+        cache_hash = _disk_cache_key(paths, labels, cfg_data, split_name)
+        cache_path = os.path.join(
+            cfg_runtime["runs_dir"], ".cache",
+            "cache_%s_%s" % (split_name, cache_hash),
+        )
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         ds = ds.cache(cache_path)
 
-    # Augment while pixels are still in [0,1]: RandomBrightness/RandomContrast clip
-    # to value_range and would destroy an ImageNet [-1,1] normalization applied earlier.
-    if augment is not None:
-        ds = ds.map(lambda x, y: (augment(x, training=True), y),
-                    num_parallel_calls=cfg_runtime["num_parallel_calls"])
+    if training:
+        ds = ds.shuffle(
+            buffer_size=min(len(paths), 10000),
+            seed=cfg_runtime["seed"],
+            reshuffle_each_iteration=True,
+        )
 
-    ds = ds.map(lambda x, y: (normalize(x), y),
-                num_parallel_calls=cfg_runtime["num_parallel_calls"])
     ds = ds.batch(batch_size, drop_remainder=False)
-    if one_hot and num_classes:
-        ds = ds.map(lambda x, y: (x, tf.one_hot(y, num_classes)),
-                    num_parallel_calls=cfg_runtime["num_parallel_calls"])
-    ds = ds.prefetch(cfg_data["prefetch"] or 1)
+
+    apply_one_hot = bool(one_hot and num_classes)
+    if skip_norm_for_model_aug:
+        # When augmentation + normalization execute inside _GPUAugmentedModel, keep pixels un-normalized here.
+        if apply_one_hot:
+            ds = ds.map(
+                lambda x, y: (x, tf.one_hot(y, num_classes)),
+                num_parallel_calls=par_calls,
+            )
+    else:
+        def _post_batch(x, y):
+            if augment is not None:
+                x = augment(x, training=True)
+            x = normalize(x)
+            if apply_one_hot:
+                y = tf.one_hot(y, num_classes)
+            return x, y
+
+        ds = ds.map(_post_batch, num_parallel_calls=par_calls)
+
+    ds = ds.prefetch(prefetch_buf)
     return ds
 
 
@@ -260,7 +461,7 @@ def compute_class_weights(labels, num_classes, mode="balanced", manual=None):
 
 
 # --------------------------------------------------------------------------- bundle
-def prepare_datasets(cfg, verbose: bool = True):
+def prepare_datasets(cfg, verbose: bool = True, augment_in_pipeline: bool = True):
     """Scan + split + build three pipelines. Returns a dict describing everything."""
     data, runtime, model, train_cfg = (
         cfg["data"], cfg["runtime"], cfg["model"], cfg["train"]
@@ -268,11 +469,13 @@ def prepare_datasets(cfg, verbose: bool = True):
     one_hot = train_cfg["loss"] != "sparse_categorical_crossentropy"
 
     paths, labels, class_names, counts = scan_dataset(
-        data["root"], data["variant"], data["class_subset"], data["max_per_class"]
+        data["root"], data["variant"], data["class_subset"], data["max_per_class"],
+        deduplicate=data["deduplicate"],
     )
     train_idx, val_idx, test_idx = split_dataset(
         paths, labels, data["val_split"], data["test_split"],
-        data["split_strategy"], data["shuffle_seed"]
+        data["split_strategy"], data["shuffle_seed"],
+        group_same_leaf=data["group_same_leaf"],
     )
 
     def subset(indices):
@@ -285,13 +488,16 @@ def prepare_datasets(cfg, verbose: bool = True):
     runtime_ctx = dict(runtime)
     runtime_ctx["_num_classes"] = len(class_names)
 
-    def make(p, l, training):
-        return build_dataset(p, l, data, runtime_ctx, model,
-                             training=training, one_hot=one_hot)
+    def make(p, l, training, split_name):
+        return build_dataset(
+            p, l, data, runtime_ctx, model,
+            training=training, one_hot=one_hot, split_name=split_name,
+            augment_in_pipeline=augment_in_pipeline if training else True,
+        )
 
-    train_ds = make(train_paths, train_labels, True)
-    val_ds = make(val_paths, val_labels, False)
-    test_ds = make(test_paths, test_labels, False)
+    train_ds = make(train_paths, train_labels, True, "train")
+    val_ds = make(val_paths, val_labels, False, "val")
+    test_ds = make(test_paths, test_labels, False, "test")
 
     bundle = {
         "class_names": class_names,

@@ -33,7 +33,8 @@ def build_simple_cnn(cfg_model, num_classes, input_shape):
         x = layers.Activation("relu", name="relu_head")(x)
     if cfg["dropout"] > 0:
         x = layers.Dropout(cfg["dropout"], name="dropout")(x)
-    outputs = layers.Dense(num_classes, activation="softmax", name="predictions")(x)
+    outputs = layers.Dense(num_classes, activation="softmax", dtype="float32",
+                           name="predictions")(x)
     return keras.Model(inputs, outputs, name="simple_cnn")
 
 
@@ -44,6 +45,7 @@ def _backbone(arch, input_shape, weights):
         "vgg16": applications.VGG16,
         "resnet50": applications.ResNet50,
         "mobilenetv2": applications.MobileNetV2,
+        "mobilenetv3_large": applications.MobileNetV3Large,
         "efficientnetb0": applications.EfficientNetB0,
     }[arch]
     return factory(include_top=False, weights=weights, input_shape=input_shape)
@@ -77,7 +79,8 @@ def build_transfer_model(cfg_model, num_classes, input_shape):
         x = layers.Activation("relu", name="relu_head")(x)
     if cfg["dropout"] > 0:
         x = layers.Dropout(cfg["dropout"], name="dropout")(x)
-    outputs = layers.Dense(num_classes, activation="softmax", name="predictions")(x)
+    outputs = layers.Dense(num_classes, activation="softmax", dtype="float32",
+                           name="predictions")(x)
     return keras.Model(inputs, outputs, name=cfg["arch"])
 
 
@@ -121,10 +124,17 @@ def _build_optimizer(cfg_train):
     }
     if name == "sgd":
         return keras.optimizers.SGD(
-            momentum=cfg_train["momentum"], nesterov=True, **common)
+            learning_rate=cfg_train["learning_rate"],
+            momentum=cfg_train["momentum"],
+            nesterov=True,
+        )
     if name == "adamw":
         return keras.optimizers.AdamW(
-            beta_1=cfg_train["beta_1"], beta_2=cfg_train["beta_2"], **common)
+            weight_decay=cfg_train["adamw_weight_decay"],
+            beta_1=cfg_train["beta_1"],
+            beta_2=cfg_train["beta_2"],
+            **common,
+        )
     if name == "rmsprop":
         return keras.optimizers.RMSprop(momentum=cfg_train["momentum"], **common)
     if name == "nadam":

@@ -2,6 +2,7 @@
 wizard, validation and --list-params. Adding a parameter = one line in SPEC."""
 import copy
 import os
+import warnings
 
 import yaml
 
@@ -24,10 +25,14 @@ SPEC = {
         ("split_strategy", "choice", "stratified", "stratified|per_class_tail",
          "stratified=acak per kelas, per_class_tail=ambil ekor tiap kelas"),
         ("shuffle_seed", "int", 42, None, "seed urutan file sebelum split"),
+        ("deduplicate", "bool", True, None,
+         "buang duplikat file persis (MD5) in-memory sebelum split"),
+        ("group_same_leaf", "bool", True, None,
+         "kelompokkan foto daun fisik sama (Leaf X.Y) agar tidak terpecah antar split"),
         ("batch_size", "int", 32, None, "ukuran batch training"),
         ("cache", "choice", "none", "none|memory|disk",
          "cache tf.data (memory ~2.6GB utk 54k citra 128px, disk pakai space)"),
-        ("prefetch", "int", 1, None, "jumlah batch di-prefetch"),
+        ("prefetch", "int", 0, None, "jumlah batch di-prefetch (0=AUTOTUNE)"),
         ("augment", "bool", True, None, "aktifkan augmentasi citra"),
         ("aug_rotation", "float", 0.04, None, "rotasi, fraksi 2pi (0.04 = ~14 derajat)"),
         ("aug_width_shift", "float", 0.10, None, "geser horizontal, fraksi lebar"),
@@ -46,7 +51,7 @@ SPEC = {
     ],
     "model": [
         ("arch", "choice", "mobilenetv2",
-         "simple_cnn|vgg16|mobilenetv2|resnet50|efficientnetb0",
+         "simple_cnn|vgg16|mobilenetv2|mobilenetv3_large|resnet50|efficientnetb0",
          "arsitektur CNN"),
         ("include_top", "bool", False, None, "pakai classifier ImageNet bawaan"),
         ("weights", "choice", "imagenet", "imagenet|none",
@@ -70,6 +75,7 @@ SPEC = {
         ("beta_1", "float", 0.9, None, "beta_1 (adam/adamw/nadam)"),
         ("beta_2", "float", 0.999, None, "beta_2 (adam/adamw/nadam)"),
         ("epsilon", "float", 1e-07, None, "epsilon optimizer"),
+        ("adamw_weight_decay", "float", 0.004, None, "decoupled weight decay untuk adamw"),
         ("loss", "choice", "categorical_crossentropy",
          "categorical_crossentropy|sparse_categorical_crossentropy|focal",
          "fungsi loss"),
@@ -100,6 +106,7 @@ SPEC = {
          "presisi campuran (butuh GPU untuk manfaat nyata)"),
         ("steps_per_epoch", "int", 0, None, "batch per epoch, 0=otomatis"),
         ("validation_steps", "int", 0, None, "batch validasi per epoch, 0=otomatis"),
+        ("log_step_every", "int", 10, None, "interval pencatatan batch_loss ke step_history.csv (0=off)"),
     ],
     "runtime": [
         ("device", "choice", "auto", "cpu|gpu|auto", "perangkat komputasi"),
@@ -110,8 +117,11 @@ SPEC = {
         ("log_csv", "bool", True, None, "tulis riwayat epoch ke CSV"),
         ("tensorboard", "bool", False, None, "tulis log TensorBoard"),
         ("resume_from", "str", "", None, "path .keras untuk lanjut training (kosong=off)"),
-        ("num_parallel_calls", "int", 4, None, "paralelisme tf.data"),
+        ("num_parallel_calls", "int", 4, None,
+         "paralelisme tf.data (0=AUTOTUNE, 4=aman CPU lokal)"),
         ("deterministic", "bool", False, None, "op deterministik (lebih lambat)"),
+        ("strategy", "choice", "auto", "auto|none|mirrored",
+         "distribusi multi-GPU: auto=MirroredStrategy jika >=2 GPU, none=1 device"),
     ],
     "eval": [
         ("eval_batch_size", "int", 32, None, "batch size saat evaluasi"),
@@ -122,6 +132,17 @@ SPEC = {
         ("sample_predictions", "int", 16, None, "jumlah gambar grid prediksi (0=off)"),
         ("save_plots", "bool", True, None, "simpan semua grafik PNG"),
         ("eval_split", "choice", "test", "val|test|train", "split yang dievaluasi"),
+        ("error_analysis", "bool", True, None,
+         "jalankan error analysis (confused pairs, misclassified, kalibrasi)"),
+        ("misclassified_samples", "int", 16, None,
+         "maks gambar salah prediksi di grid (0=off)"),
+        ("top_confused_pairs", "int", 20, None,
+         "maks pasangan kelas tertukar di laporan"),
+        ("gradcam", "bool", True, None, "buat visualisasi Grad-CAM saat evaluasi"),
+        ("gradcam_samples", "int", 8, None,
+         "jumlah sampel pada grid Grad-CAM (0=off)"),
+        ("gradcam_alpha", "float", 0.4, None,
+         "opasitas overlay heatmap Grad-CAM (0..1]"),
     ],
 }
 
@@ -253,9 +274,15 @@ def validate(config: dict) -> list:
         problems.append("data.batch_size minimal 1")
     if data["max_per_class"] < 0:
         problems.append("data.max_per_class tidak boleh negatif")
+    if data["prefetch"] < 0:
+        problems.append("data.prefetch tidak boleh negatif")
 
     if train["learning_rate"] <= 0:
         problems.append("train.learning_rate harus > 0")
+    if train["adamw_weight_decay"] < 0:
+        problems.append("train.adamw_weight_decay tidak boleh negatif")
+    if train["log_step_every"] < 0:
+        problems.append("train.log_step_every tidak boleh negatif")
     if train["epochs"] < 1:
         problems.append("train.epochs minimal 1")
     if not 0.0 <= train["label_smoothing"] < 1.0:
@@ -266,6 +293,37 @@ def validate(config: dict) -> list:
         problems.append("model.conv_blocks minimal 1")
     if train["class_weight"] == "manual" and not train["class_weight_manual"]:
         problems.append("class_weight=manual tapi class_weight_manual kosong")
+    if data["normalize"] == "div255" and model["arch"] != "simple_cnn" and model["weights"] == "imagenet":
+        problems.append(
+            "kombinasi berbahaya: data.normalize=div255 dengan pretrained ImageNet backbone "
+            "(gunakan data.normalize=imagenet)"
+        )
+    if not data["rescale"] and data["augment"] and (
+        data["aug_brightness"] > 0 or data["aug_contrast"] > 0
+    ):
+        problems.append(
+            "kombinasi berbahaya: data.rescale=false dengan aug_brightness/aug_contrast > 0 "
+            "(value_range=(0, 1) merusak citra [0, 255])"
+        )
+
+    if train["loss"] == "focal" and train["class_weight"] == "balanced":
+        warnings.warn(
+            "train.loss=focal digabung dengan train.class_weight=balanced berpotensi melakukan double-weighting.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if train["label_smoothing"] > 0 and train["loss"] != "categorical_crossentropy":
+        warnings.warn(
+            "train.label_smoothing > 0 hanya aktif pada categorical_crossentropy (diabaikan oleh loss saat ini).",
+            UserWarning,
+            stacklevel=2,
+        )
+    if model["fine_tune_at"] > 0 and not model["freeze_base"]:
+        warnings.warn(
+            "model.fine_tune_at > 0 diabaikan saat model.freeze_base=false (seluruh backbone terbuka).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if runtime["device"] == "gpu":
         try:
@@ -277,10 +335,20 @@ def validate(config: dict) -> list:
         except Exception as exc:  # pragma: no cover
             problems.append("gagal cek GPU: %s" % exc)
 
+    if runtime["num_parallel_calls"] < 0:
+        problems.append("runtime.num_parallel_calls tidak boleh negatif")
     if ev["top_k"] < 1:
         problems.append("eval.top_k minimal 1")
     if ev["eval_batch_size"] < 1:
         problems.append("eval.eval_batch_size minimal 1")
+    if ev["misclassified_samples"] < 0:
+        problems.append("eval.misclassified_samples tidak boleh negatif")
+    if ev["top_confused_pairs"] < 0:
+        problems.append("eval.top_confused_pairs tidak boleh negatif")
+    if ev["gradcam_samples"] < 0:
+        problems.append("eval.gradcam_samples tidak boleh negatif")
+    if not 0.0 < ev["gradcam_alpha"] <= 1.0:
+        problems.append("eval.gradcam_alpha harus di (0, 1]")
 
     return problems
 
