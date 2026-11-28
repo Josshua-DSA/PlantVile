@@ -239,6 +239,24 @@ h1 em{font-style:italic;font-weight:500;color:var(--leaf);font-variation-setting
 .p-samples{grid-area:samples}
 .p-samples[hidden]{display:none}
 
+/* Sumber deliverable (results/artifacts) tidak punya history, per-class, atau
+   matriks, jadi panelnya diganti dua panel lebar alih-alih dibiarkan kosong. */
+.p-bench[hidden],.p-info[hidden]{display:none}
+.grid.bench-mode{display:flex;flex-direction:column;gap:clamp(14px,1.5vw,18px)}
+.bench-wrap{overflow-x:auto;margin:0 -6px;padding:0 6px;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.bench-wrap table{min-width:660px}
+tbody td.fmt{font-family:var(--mono);font-size:11px;color:var(--muted)}
+tbody tr.bad td{background:rgba(240,194,116,.055)}
+td.num.bad{color:var(--amber)}
+.info-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:0;margin:0;border-top:1px solid var(--line)}
+.info-list>div{padding:12px 18px 13px 0;border-bottom:1px solid var(--line);min-width:0}
+.info-list dt{font-size:11px;color:var(--faint);margin-bottom:3px}
+.info-list dd{margin:0;font-size:12.5px;line-height:1.45;color:rgba(232,242,236,.9);
+  overflow-wrap:anywhere}
+.info-list dd.mono{font-family:var(--mono);font-size:11.5px}
+
 .head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
 .head h2{margin:0;font-size:13.5px;font-weight:600}
 .head .sub{font-size:11.5px;color:var(--faint)}
@@ -494,6 +512,40 @@ td.barcell{width:32%}
         </div>
         <div id="samples"></div>
       </article>
+
+      <article class="panel sheet p-bench rise" style="--d:.18s" id="benchPanel" hidden>
+        <div class="head">
+          <h2>Benchmark format model</h2>
+          <span class="sub n" id="benchSub"></span>
+        </div>
+        <div class="bench-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Format</th>
+                <th class="num" scope="col">Ukuran</th>
+                <th class="num" scope="col">p50 ms</th>
+                <th class="num" scope="col">p95 ms</th>
+                <th class="num" scope="col">Akurasi</th>
+                <th class="num" scope="col">F1 macro</th>
+                <th class="num" scope="col">&Delta; F1</th>
+                <th class="num" scope="col">Recall terendah</th>
+              </tr>
+            </thead>
+            <tbody id="benchBody"></tbody>
+          </table>
+        </div>
+        <p class="note" id="benchNote"></p>
+      </article>
+
+      <article class="panel sheet p-info rise" style="--d:.24s" id="infoPanel" hidden>
+        <div class="head">
+          <h2>Kartu model</h2>
+          <span class="sub">results/artifacts/model_metadata.json</span>
+        </div>
+        <dl class="info-list" id="infoList"></dl>
+      </article>
     </div>
   </main>
 
@@ -573,6 +625,80 @@ const num = (v,d=3) => v == null ? "–" : Number(v).toFixed(d);
 const pretty = n => n.replace(/___/g," / ").replace(/__/g," ").replace(/_/g," ");
 const isDemo = () => state.kind === "demo";
 
+/* Hasil deliverable tim: metadata ringan yang ikut ter-commit di
+   results/artifacts, jadi tetap ada walau folder runs/ tidak dibawa. */
+const KAGGLE_PATH = "results/artifacts/model_metadata.json";
+const FORMAT_ORDER = ["keras_fp32","tflite_fp32","tflite_fp16","tflite_int8"];
+const fmtLabel = f => f.startsWith("tflite_")
+  ? "TFLite " + f.slice(7)
+  : "Keras " + f.slice(6);
+
+async function kaggleState(){
+  const d = await getJSON(KAGGLE_PATH);
+  const models = d.models || {};
+  const names = Object.keys(models);
+  if (!names.length) throw new Error("metadata kosong");
+
+  const webName = models[d.recommended_web_model] ? d.recommended_web_model : names[0];
+  const web = models[webName];
+  const base = web.benchmarks.find(b => b.format === "keras_fp32") || web.benchmarks[0];
+  // angka latensi dan ukuran harus dari baris TFLite, bukan Keras
+  const tflite = web.benchmarks.find(b => b.format === "tflite_fp32") || base;
+
+  // model rekomendasi dulu, lalu sisanya; tiap model urut fp32 ke int8
+  const ordered = [webName, ...names.filter(n => n !== webName)];
+  const bench = ordered.flatMap(name => {
+    const m = models[name];
+    const rows = (m.benchmarks || []).map(b => ({ ...b, model: name, arch: m.arch }));
+    return rows.sort((a,b) => FORMAT_ORDER.indexOf(a.format) - FORMAT_ORDER.indexOf(b.format));
+  });
+
+  return {
+    kind:"kaggle",
+    label:"hasil deliverable · " + web.arch,
+    numClasses:d.num_classes || 15,
+    classes:[],
+    bench, web, meta0:d,
+    lede:[
+      `${d.num_classes} kelas`,
+      `${base.samples.toLocaleString("id-ID")} sampel uji`,
+      `${web.arch} fine-tuned ${web.input_shape.slice(1).join(" × ")}`,
+      `TFLite fp32 ${tflite.p50_ms.toFixed(1)} ms/citra`
+    ].join(" · "),
+    ribbon:[
+      ["Macro F1", num(base.f1_macro), ""],
+      ["Akurasi", pct(base.accuracy) + "%",
+       `CI95 ${num(base.acc_ci95?.[0],4)}–${num(base.acc_ci95?.[1],4)}`],
+      ["Recall terendah", num(base.worst_class_recall), "kelas terburuk"],
+      ["Kalibrasi ECE", num(web.val_ece_before,3), `setelah suhu ${num(web.val_ece_after_oof,3)}`],
+      ["Sampel uji", base.samples.toLocaleString("id-ID"), `split ${base.eval_split}`]
+    ],
+    history:{},
+    metrics:{ split:base.eval_split, samples:base.samples, accuracy:base.accuracy,
+              precision_macro:base.precision_macro, recall_macro:base.recall_macro,
+              f1_macro:base.f1_macro },
+    meta:[
+      [web.arch, "arsitektur"],
+      [web.input_shape.slice(1).join(" × "), "input"],
+      [tflite.size_mb.toFixed(1) + " MB", "TFLite fp32"],
+      [tflite.p50_ms.toFixed(1) + " ms", "p50 TFLite fp32"],
+      ["T = " + Number(web.temperature_T).toFixed(3), "kalibrasi suhu"]
+    ],
+    info:[
+      ["Model web", d.recommended_web_model],
+      ["Model mobile", `${d.recommended_mobile_model} · ${d.recommended_mobile_quant}`],
+      ["Arsitektur", web.arch],
+      ["Input", `${web.input_shape.slice(1).join(" × ")}, ${web.input_dtype}`],
+      ["Preprocessing", web.preprocessing],
+      ["Suhu kalibrasi T", Number(web.temperature_T).toFixed(5), true],
+      ["ECE validasi", `${num(web.val_ece_before,4)} sebelum, ${num(web.val_ece_after_oof,4)} setelah temperature scaling`],
+      ["Ambang keyakinan rendah", String(d.low_confidence_threshold), true],
+      ["Split evaluasi", String(d.eval_split), true]
+    ],
+    images:{}
+  };
+}
+
 function mulberry32(a){
   return function(){
     a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -600,10 +726,15 @@ function render(st){
   const m = st.metrics || {};
   const cls = st.classes || [];
   const acc = m.accuracy ?? 0;
+  const benchMode = st.kind === "kaggle";
 
+  $(".grid").classList.toggle("bench-mode", benchMode);
+  $("#benchPanel").hidden = !benchMode;
+  $("#infoPanel").hidden = !benchMode;
   $("#banner").hidden = st.kind !== "demo";
   $("#state").classList.toggle("live", st.kind !== "demo");
-  $("#state").lastElementChild.textContent = st.kind === "demo" ? "Demo" : "Run asli";
+  $("#state").lastElementChild.textContent =
+    st.kind === "demo" ? "Demo" : benchMode ? "Deliverable" : "Run asli";
   $("#footSrc").textContent = "sumber: " + (st.kind === "demo" ? "angka contoh" : st.label);
   document.title = "PlantVile · " + (st.kind === "demo" ? "angka contoh" : st.label);
 
@@ -619,20 +750,20 @@ function render(st){
 
   $("#lensStats").innerHTML = [
     ["macro F1", num(m.f1_macro)],
-    ["kelas", cls.length || "–"],
+    ["kelas", cls.length || st.numClasses || "–"],
     ["sampel uji", m.samples ? m.samples.toLocaleString("id-ID") : "–"]
   ].map(([k,v]) => `<li><dt>${k}</dt><dd>${v}</dd></li>`).join("");
 
   $("#runmeta").innerHTML = (st.meta || [])
     .map(([v,k]) => `<li>${esc(k)} <b>${esc(v)}</b></li>`).join("");
 
-  $("#ribbon").innerHTML = [
+  $("#ribbon").innerHTML = (st.ribbon || [
     ["Macro F1", num(m.f1_macro), ""],
     ["Presisi macro", num(m.precision_macro), ""],
     ["Recall macro", num(m.recall_macro), ""],
     ["F1 weighted", num(m.f1_weighted), ""],
     ["Sampel uji", m.samples ? m.samples.toLocaleString("id-ID") : "–", `split ${m.split || "–"}`]
-  ].map(([k,v,s]) => `<div class="cell"><span class="k">${k}</span>
+  ]).map(([k,v,s]) => `<div class="cell"><span class="k">${k}</span>
       <div class="v">${v}${s?` <small>${esc(s)}</small>`:""}</div></div>`).join("");
 
   // charts, with the one number worth reading off them
@@ -667,7 +798,7 @@ function render(st){
       <span class="bar"><i style="width:${(v/maxCount*100).toFixed(1)}%;animation-delay:${i*30}ms"></i></span>
     </li>`;
   }).join("");
-  $("#distNote").innerHTML = minCount
+  $("#distNote").innerHTML = Number.isFinite(minCount) && minCount > 0
     ? `Kelas terbesar <b>${(maxCount/minCount).toFixed(0)}×</b> kelas terkecil
        (${maxCount.toLocaleString("id-ID")} vs ${minCount.toLocaleString("id-ID")}),
        jadi <b>class_weight=${esc(st.classWeight || "balanced")}</b> dipakai.`
@@ -701,6 +832,64 @@ function render(st){
     ? `<img src="${st.images.samples}" alt="Grid contoh prediksi: label asli dan prediksi model">`
     : "";
   $("#samplesPanel").hidden = !st.images?.samples;
+
+  if (benchMode){ renderBench(st); renderInfo(st); }
+}
+
+function renderBench(st){
+  const rows = st.bench || [];
+  const samples = st.metrics?.samples;
+  $("#benchSub").textContent = rows.length
+    ? `${rows.length} konfigurasi · split ${st.metrics?.split || "test"}` +
+      (samples ? ` · ${samples.toLocaleString("id-ID")} sampel` : "")
+    : "";
+  $("#benchBody").innerHTML = rows.map(b => {
+    const drop = Number(b.delta_f1_vs_fp32 || 0);
+    const bad = drop < -0.05;
+    const delta = drop === 0 ? "–" : (drop > 0 ? "+" : "") + drop.toFixed(3);
+    return `<tr class="${bad ? "bad" : ""}">
+      <td class="nm">${esc(b.arch)}</td>
+      <td class="fmt">${esc(fmtLabel(b.format))}</td>
+      <td class="num">${Number(b.size_mb).toFixed(1)} MB</td>
+      <td class="num">${Number(b.p50_ms).toFixed(1)}</td>
+      <td class="num">${Number(b.p95_ms).toFixed(1)}</td>
+      <td class="num">${num(b.accuracy)}</td>
+      <td class="num">${num(b.f1_macro)}</td>
+      <td class="num${bad ? " bad" : ""}">${delta}</td>
+      <td class="num">${num(b.worst_class_recall)}</td>
+    </tr>`;
+  }).join("");
+  $("#benchNote").innerHTML = benchNote(st);
+}
+
+/* Kalimatnya dihitung dari data, bukan ditulis tangan, supaya tetap benar
+   kalau metadata-nya diperbarui tim. */
+function benchNote(st){
+  const rows = st.bench || [];
+  const int8 = rows.filter(r => r.format === "tflite_int8");
+  if (!int8.length) return "";
+  const worst = [...int8].sort((a,b) => a.delta_f1_vs_fp32 - b.delta_f1_vs_fp32)[0];
+  const best  = [...int8].sort((a,b) => b.delta_f1_vs_fp32 - a.delta_f1_vs_fp32)[0];
+  const base = rows.find(r => r.model === worst.model && r.format === "keras_fp32") || {};
+  const d = st.meta0 || {};
+  return `INT8 paling merugikan <b>${esc(worst.arch)}</b>: F1 turun
+    <b>${Math.abs(worst.delta_f1_vs_fp32).toFixed(3)}</b>
+    (${num(base.f1_macro)} ke ${num(worst.f1_macro)}), sementara
+    <b>${esc(best.arch)}</b> cuma turun ${Math.abs(best.delta_f1_vs_fp32).toFixed(3)}.
+    Karena itu rekomendasi mobile
+    <b>${esc(d.recommended_mobile_model || "–")} ${esc(d.recommended_mobile_quant || "")}</b>.`;
+}
+
+function renderInfo(st){
+  $("#infoList").innerHTML = (st.info || [])
+    .map(([k,v,mono]) =>
+      `<div><dt>${esc(k)}</dt><dd${mono ? ' class="mono"' : ""}>${esc(v)}</dd></div>`)
+    .join("");
+}
+
+async function renderKaggle(){
+  try { render(await kaggleState()); }
+  catch { render(demoState()); }
 }
 
 function chartSVG(series, {asPct=false, id="g0"} = {}){
@@ -897,8 +1086,6 @@ async function discoverRuns(){
   const params = new URLSearchParams(location.search);
   if (params.get("glass") === "full") document.documentElement.dataset.glass = "full";
 
-  render(state);
-
   document.querySelectorAll(".glass").forEach(el => {
     el.addEventListener("pointermove", e => {
       const r = el.getBoundingClientRect();
@@ -907,16 +1094,31 @@ async function discoverRuns(){
     });
   });
 
-  const runs = await discoverRuns();
+  const [runs, meta] = await Promise.all([
+    discoverRuns(),
+    getJSON(KAGGLE_PATH).catch(() => null)
+  ]);
+
   const sel = $("#runSel");
+  if (meta) {
+    const web = meta.models?.[meta.recommended_web_model];
+    sel.add(new Option("Hasil deliverable · " + (web?.arch || "Kaggle"), "kaggle"));
+  }
   runs.forEach(r => sel.add(new Option(r, "runs/" + r)));
-  sel.addEventListener("change", () => { if (sel.value) loadRun(sel.value); });
+  sel.addEventListener("change", () => {
+    if (sel.value === "kaggle") renderKaggle();
+    else if (sel.value) loadRun(sel.value);
+    else render(demoState());
+  });
   $("#runPath").addEventListener("keydown", e => {
     if (e.key === "Enter" && e.target.value.trim()) loadRun(e.target.value.trim());
   });
 
+  // default: hasil deliverable kalau ada, karena itu angka yang dilaporkan
   const q = params.get("run");
-  if (q) loadRun(q);
+  if (q) await loadRun(q);
+  else if (meta) { sel.value = "kaggle"; await renderKaggle(); }
+  else render(demoState());
 })();
 </script>
 </body>
